@@ -33,25 +33,36 @@ from .config import Config
 from . import terrain
 from .i18n import get_strings
 from .fonts import load_font
-from .creatures import spawn_creatures, Creature, spawn_child
+from .creatures import spawn_creatures, Creature, spawn_child, Genome
+from .genetics import is_same_species, are_different_species
+
+# RL imports (optional - only if USE_RL is enabled)
+try:
+    from .rl import GlobalRLManager, RLCreature, RLTrainingVisualizer
+    RL_AVAILABLE = True
+except ImportError:
+    RL_AVAILABLE = False
+    RLCreature = None
+    GlobalRLManager = None
+    RLTrainingVisualizer = None
 
 
 # Constants for creature behavior
-BREED_WINDOW_SECONDS = 2.0
-BREED_PROXIMITY_BONUS = 10.0
-MAX_BIRTHS_PER_FRAME = 5
-POPULATION_CAP = 64
-INITIAL_CREATURE_COUNT = 40
+BREED_WINDOW_SECONDS = 5.0  # Increased from 2.0 to allow more breeding opportunities
+BREED_PROXIMITY_BONUS = 25.0  # Increased from 10.0 to make proximity detection easier
+MAX_BIRTHS_PER_FRAME = 10  # Increased from 5 to allow more births per frame
+POPULATION_CAP = 128
+INITIAL_CREATURE_COUNT = 80
 
-# Affinity computation constants - Enhanced for stronger tropism
-RESOURCE_ATTRACT_BASE = 4.0  # Increased from 2.0
-RESOURCE_ATTRACT_CURIOSITY_SCALE = 2.5  # Increased from 1.5
-RESOURCE_DISTANCE_FALLOFF = 60.0  # Increased from 40.0 (wider attraction range)
-HAZARD_REPEL_BASE = 4.5  # Increased from 2.2
-HAZARD_REPEL_CAUTION_SCALE = 2.8  # Increased from 1.8
-HAZARD_DISTANCE_FALLOFF = 50.0  # Increased from 25.0 (wider repulsion range)
-MATE_DISTANCE_FALLOFF = 40.0
-MATE_BEAUTY_FERTILITY_SCALE = 1.2
+# Affinity computation constants - Enhanced for stronger tropism and higher activity
+RESOURCE_ATTRACT_BASE = 6.0  # Increased from 4.0 for more active movement
+RESOURCE_ATTRACT_CURIOSITY_SCALE = 3.0  # Increased from 2.5
+RESOURCE_DISTANCE_FALLOFF = 70.0  # Increased from 60.0 (wider attraction range)
+HAZARD_REPEL_BASE = 6.5  # Increased from 4.5 for more active avoidance
+HAZARD_REPEL_CAUTION_SCALE = 3.5  # Increased from 2.8
+HAZARD_DISTANCE_FALLOFF = 60.0  # Increased from 50.0 (wider repulsion range)
+MATE_DISTANCE_FALLOFF = 50.0  # Increased from 40.0
+MATE_BEAUTY_FERTILITY_SCALE = 1.5  # Increased from 1.2
 
 
 class TopDownScene:
@@ -119,18 +130,81 @@ class TopDownScene:
         self.current_season = 'normal'  # 'growth', 'danger', 'normal'
         
         self._build_all_terrains()
+        
+        # Initialize cache timers
+        self._species_cache_clear_timer = 0.0
 
+        # RL System (if enabled and available)
+        self.use_rl = cfg.use_rl and RL_AVAILABLE
+        self.rl_manager = None
+        self.rl_visualizer = None
+        if self.use_rl:
+            self.rl_manager = GlobalRLManager(state_dim=210, action_dim=12)
+            if RLTrainingVisualizer:
+                self.rl_visualizer = RLTrainingVisualizer(max_history=10000)
+        
+        # Map bodies to creatures for quick lookup (initialize before spawning)
+        self.body_to_creature: Dict[pymunk.Body, Creature] = {}
+        
         # Creatures
-        self.creatures: List[Creature] = spawn_creatures(
-            self.space,
-            count=INITIAL_CREATURE_COUNT,
-            area=(120, 120, WINDOW_WIDTH - 120, WINDOW_HEIGHT - 120),
-        )
+        if self.use_rl:
+            # Use RL creatures
+            self.creatures: List[Creature] = self._spawn_rl_creatures(
+                count=INITIAL_CREATURE_COUNT,
+                area=(120, 120, WINDOW_WIDTH - 120, WINDOW_HEIGHT - 120),
+            )
+        else:
+            # Use regular gene-driven creatures (3 species, high speed)
+            self.creatures: List[Creature] = spawn_creatures(
+                self.space,
+                count=INITIAL_CREATURE_COUNT,
+                area=(120, 120, WINDOW_WIDTH - 120, WINDOW_HEIGHT - 120),
+                num_species=3,
+                high_speed=True,
+            )
+            # Update body mapping for regular creatures
+            self.body_to_creature.update({c.body: c for c in self.creatures})
+        
         self.pop_cap = POPULATION_CAP
-
-        # Map bodies to creatures for quick lookup
-        self.body_to_creature: Dict[pymunk.Body, Creature] = {c.body: c for c in self.creatures}
-
+        
+        # RL training state
+        if self.use_rl:
+            self._rl_train_counter = 0
+        
+        # Performance optimization: Cache GeneEffects (shared instance)
+        from .genetics import GeneEffects
+        self._gene_effects_cache = GeneEffects()
+        
+        # Performance optimization: Cache terrain centers and bounding boxes
+        self._terrain_centers_cache: Dict[pymunk.Shape, Tuple[float, float]] = {}
+        self._terrain_bbox_cache: Dict[pymunk.Shape, Tuple[float, float, float]] = {}  # (min_dist_sq, max_dist_sq)
+        self._cache_terrain_centers()
+        
+        # Performance optimization: Affinity computation cache (update less frequently)
+        self._affinity_cache: Dict[Creature, Tuple[float, float]] = {}
+        self._affinity_cache_timer = 0.0
+        self._affinity_cache_interval = 0.15  # Update affinity every 0.15 seconds instead of every frame
+        
+        # Performance optimization: Species comparison cache
+        self._species_cache: Dict[Tuple[int, int], bool] = {}  # (id1, id2) -> is_same_species
+        
+        # Statistics tracking for post-run analysis
+        self.stats = {
+            'time_steps': [],
+            'population': [],
+            'births_total': 0,
+            'deaths_total': 0,
+            'predations_total': 0,
+            'resource_consumed': 0.0,
+            'avg_speed': [],
+            'avg_age': [],
+            'species_count': [],
+            'terrain_resources': {t: [] for t in self.terrain_shapes.keys()},
+            'terrain_hazards': {t: [] for t in self.terrain_shapes.keys()},
+        }
+        self.stats_timer = 0.0
+        self.stats_update_interval = 0.5  # Update stats every 0.5 seconds
+        
         # Resources and hazards are now terrain properties, not separate objects
         # No need for resource/hazard lists or respawn queues
 
@@ -310,6 +384,8 @@ class TopDownScene:
 
     def _compute_affinity(self, c: Creature) -> Tuple[float, float]:
         """Compute steering bias vector for creature based on terrain properties and mates.
+        
+        Optimized with caching and early exits.
 
         Args:
             c: Creature to compute affinity for
@@ -333,19 +409,36 @@ class TopDownScene:
         worst_hazard_score = 1e12
         worst_hazard_dist = 1e12
         
+        # Pre-compute gene effects (use cached instance)
+        genome_dict = c.genome.to_dict()
+        resource_attract_mult = self._gene_effects_cache.get_resource_attraction_strength(genome_dict)
+        hazard_repel_mult = self._gene_effects_cache.get_hazard_repulsion_strength(genome_dict)
+        
         # Sample nearby terrains to compute attraction/repulsion
-        # Optimize: only check terrains within reasonable distance
+        # Optimize: use cached centers and early exit (reduced range to avoid over-computation)
+        max_check_dist_sq = 80000  # Reduced from 100000 to 80000 (~282 pixels) to reduce locking
         for terrain_type, shapes in self.terrain_shapes.items():
             for shape in shapes:
-                # Get terrain center
-                cx = shape.body.position.x
-                cy = shape.body.position.y
-                dx = cx - px
-                dy = cy - py
-                dist2 = dx * dx + dy * dy
+                # Use cached center if available, otherwise compute
+                if shape in self._terrain_bbox_cache:
+                    cx, cy, radius = self._terrain_bbox_cache[shape]
+                    # Quick bounding box check before precise calculation
+                    dx = cx - px
+                    dy = cy - py
+                    dist2 = dx * dx + dy * dy
+                    # Early exit: check if outside bounding sphere
+                    if dist2 > (radius + max_check_dist_sq ** 0.5) ** 2:
+                        continue
+                else:
+                    # Fallback: compute center
+                    cx = shape.body.position.x
+                    cy = shape.body.position.y
+                    dx = cx - px
+                    dy = cy - py
+                    dist2 = dx * dx + dy * dy
                 
-                # Early exit if too far (optimization)
-                if dist2 > 100000:  # Skip if distance > 316 pixels
+                # Early exit if too far
+                if dist2 > max_check_dist_sq:
                     continue
                 
                 # Get resource/hazard values from dynamic state if available
@@ -359,40 +452,51 @@ class TopDownScene:
                 else:
                     continue  # Skip terrains without resource/hazard data
                 
-                # Enhanced scoring: stronger weighting for resources and hazards
-                # Resource score: heavily weighted by resource value and curiosity
-                resource_score = resource_val * (2.0 + 3.0 * c.genome.curiosity) - hazard_val * (0.5 + 0.5 * c.genome.caution)
-                # Hazard score: heavily weighted by hazard level and caution
-                hazard_score = hazard_val * (2.5 + 3.5 * c.genome.caution) - resource_val * (0.3 + 0.3 * c.genome.curiosity)
+                # Early exit if both resource and hazard are negligible
+                if resource_val < 0.01 and hazard_val < 0.01:
+                    continue
                 
-                # Collect multiple attractive terrains
-                if resource_score > 0 and dist2 < 25000:  # Increased range
+                # Resource score: heavily weighted by resource value and curiosity/olfactory
+                resource_score = resource_val * (2.0 + 3.0 * c.genome.curiosity) * resource_attract_mult - hazard_val * (0.5 + 0.5 * c.genome.caution)
+                # Hazard score: heavily weighted by hazard level and caution
+                hazard_score = hazard_val * (2.5 + 3.5 * c.genome.caution) * hazard_repel_mult - resource_val * (0.3 + 0.3 * c.genome.curiosity)
+                
+                # Collect multiple attractive terrains (reduced range to avoid over-attraction)
+                if resource_score > 0 and dist2 < 25000:  # Reduced from 40000 to 25000 to reduce locking
                     resource_terrains.append((dx, dy, dist2, resource_score))
                     if resource_score > best_resource_score:
                         best_resource_score = resource_score
                         best_resource_terrain = (dx, dy, dist2)
                         best_resource_dist = dist2
                 
-                # Collect multiple dangerous terrains
-                if hazard_score > 0 and dist2 < 90000:  # Increased range
+                # Collect multiple dangerous terrains (reduced range slightly)
+                if hazard_score > 0 and dist2 < 70000:  # Reduced from 90000 to 70000
                     hazard_terrains.append((dx, dy, dist2, hazard_score))
                     if hazard_score > worst_hazard_score:
                         worst_hazard_score = hazard_score
                         worst_hazard_terrain = (dx, dy, dist2)
                         worst_hazard_dist = dist2
         
-        # Mating instinct: find nearest ready same-species mate
+        # Mating instinct: find nearest ready same-species mate (optimized)
         mate_dx = 0.0
         mate_dy = 0.0
         mate_d2 = 1e12
         if c._breed_cd <= BREED_WINDOW_SECONDS:
+            c_species_id = id(c.genome)
             for other in self.creatures:
                 if other is c or other.dead:
                     continue
-                if other.genome.species_id != c.genome.species_id:
-                    continue
                 if other._breed_cd > BREED_WINDOW_SECONDS:
                     continue
+                
+                # Quick species check using cache
+                cache_key = (c_species_id, id(other.genome))
+                if cache_key not in self._species_cache:
+                    self._species_cache[cache_key] = is_same_species(other.genome.to_dict(), c.genome.to_dict())
+                
+                if not self._species_cache[cache_key]:
+                    continue
+                
                 ox, oy = other.body.position.x, other.body.position.y
                 dx = ox - px
                 dy = oy - py
@@ -417,7 +521,7 @@ class TopDownScene:
                 weight = 1.0 / (1.0 + i * 0.5)
                 attract = RESOURCE_ATTRACT_BASE * (
                     1.2 + RESOURCE_ATTRACT_CURIOSITY_SCALE * c.genome.curiosity
-                ) * inv * max(0.2, score) * 1.5 * weight  # Amplified by 1.5x
+                ) * inv * max(0.2, score) * 1.0 * weight  # Reduced from 1.5x to 1.0x to reduce locking
                 bias_x += dx * attract
                 bias_y += dy * attract
 
@@ -433,16 +537,20 @@ class TopDownScene:
                 weight = 1.0 / (1.0 + i * 0.4)
                 repel = HAZARD_REPEL_BASE * (
                     1.3 + HAZARD_REPEL_CAUTION_SCALE * c.genome.caution
-                ) * inv * max(0.2, score) * 1.8 * weight  # Amplified by 1.8x
+                ) * inv * max(0.2, score) * 1.2 * weight  # Reduced from 1.8x to 1.2x to reduce locking
                 bias_x -= dx * repel
                 bias_y -= dy * repel
 
-        # Mating attraction (beauty and fertility influence)
+        # Mating attraction (beauty and fertility influence, plus breeding_urge)
+        from .genetics import GeneEffects
+        gene_effects = GeneEffects()
+        genome_dict = c.genome.to_dict()
+        breeding_urge = genome_dict.get("breeding_urge", 0.5)
         if mate_d2 < 1e12 and mate_d2 > 0.1:
             sqrt_mate_d2 = math.sqrt(max(0.01, mate_d2))
             inv = 1.0 / (sqrt_mate_d2 + MATE_DISTANCE_FALLOFF)
             mate_weight = 1.0 + MATE_BEAUTY_FERTILITY_SCALE * (
-                0.5 * (c.genome.beauty + c.genome.fertility)
+                    (0.3 * c.genome.beauty + 0.3 * c.genome.fertility + 0.4 * breeding_urge)
             )
             bias_x += mate_dx * inv * mate_weight
             bias_y += mate_dy * inv * mate_weight
@@ -472,16 +580,28 @@ class TopDownScene:
         px, py = body.position.x, body.position.y
         current_terrain_shapes = []
         
-        # Check all terrain types
+        # Check all terrain types (optimized with bounding box pre-check)
         for terrain_type, shapes in self.terrain_shapes.items():
             for shape in shapes:
+                # Use cached bounding box for quick rejection
+                if shape in self._terrain_bbox_cache:
+                    cx, cy, radius = self._terrain_bbox_cache[shape]
+                    dx = px - cx
+                    dy = py - cy
+                    dist_sq = dx * dx + dy * dy
+                    # Quick rejection: outside bounding sphere
+                    if dist_sq > radius * radius * 1.1:  # 10% margin
+                        continue
+                
+                # Precise check
                 if isinstance(shape, pymunk.Circle):
-                    dx = px - shape.body.position.x
-                    dy = py - shape.body.position.y
+                    if shape not in self._terrain_bbox_cache:
+                        dx = px - shape.body.position.x
+                        dy = py - shape.body.position.y
                     if dx * dx + dy * dy <= shape.radius * shape.radius:
                         current_terrain_shapes.append(shape)
                 elif isinstance(shape, pymunk.Poly):
-                    # Point-in-polygon check
+                    # Point-in-polygon check (only if inside bounding box)
                     verts = shape.get_vertices()
                     if len(verts) >= 3:
                         # Transform point to local coordinates
@@ -555,21 +675,38 @@ class TopDownScene:
                     (0, 0)
                 )
 
-        # Apply resource effects continuously
+        # Apply resource effects continuously (optimized for better gameplay)
+        # Track resource consumption for RL creatures
         if resource_value > 0:
             # Resource provides growth, speed, and breeding benefits
             # Scale by creature's metabolism, speed_adaptability, and fertility genes
-            growth_amount = resource_value * dt * c.genome.metabolism
-            speed_boost = resource_value * dt * c.genome.speed_adaptability * 0.3
-            breed_reduction = resource_value * dt * c.genome.fertility * 0.5
+            # Increased multipliers for more noticeable effects
+            metabolism = c.genome.metabolism
+            speed_adapt = c.genome.speed_adaptability
+            fertility = c.genome.fertility
+            
+            # Growth: more noticeable (increased multiplier)
+            growth_amount = resource_value * dt * metabolism * 1.5  # Increased from 1.0 to 1.5
+            
+            # Speed boost: more impactful (increased multiplier)
+            speed_boost = resource_value * dt * speed_adapt * 0.5  # Increased from 0.3 to 0.5
+            
+            # Breeding cooldown reduction: more effective (increased multiplier)
+            breed_reduction = resource_value * dt * fertility * 0.8  # Increased from 0.5 to 0.8
             
             # Apply growth (increase size and mass)
             if growth_amount > 0:
                 old_radius = c.genome.body_radius
-                new_radius = min(30.0, old_radius + growth_amount * 0.5)
+                new_radius = min(30.0, old_radius + growth_amount * 0.6)  # Increased from 0.5 to 0.6
                 if new_radius > old_radius:
                     # Update physics body
                     c.genome.body_radius = new_radius
+                    
+                    # Track resource consumption for RL creatures
+                    if self.use_rl and hasattr(c, 'episode_info') and isinstance(c, RLCreature):
+                        c.episode_info['gained_resource'] = True
+                        c.episode_info['resource_value'] = resource_value * dt
+                        c.episode_info['resources_gained'] += resource_value * dt
                     new_mass = max(0.6, c.genome.body_radius * 0.15)
                     # Remove old shape and create new one with updated radius
                     old_shape = c.shape
@@ -591,12 +728,12 @@ class TopDownScene:
                     if c.body in self.body_to_creature:
                         self.body_to_creature[c.body] = c
             
-            # Apply speed boost
+            # Apply speed boost (more noticeable)
             if speed_boost > 0:
-                speed_mult *= (1.0 + speed_boost)
+                speed_mult *= (1.0 + speed_boost * 1.2)  # Additional 20% boost multiplier
             
-            # Apply breeding cooldown reduction
-            cooldown_bonus += breed_reduction
+            # Apply breeding cooldown reduction (more effective)
+            cooldown_bonus += breed_reduction * 1.3  # Additional 30% effectiveness
 
         # Apply hazard effects continuously
         if hazard_level > 0:
@@ -604,14 +741,19 @@ class TopDownScene:
             
             # Chance to suffer hazard each frame
             if random.random() < hazard_level * dt:
+                # Get terrain type for RL tracking
+                terrain_type = "default"
+                for terrain_type_name, shapes in self.terrain_shapes.items():
+                    for shape in shapes:
+                        if hasattr(shape, 'terrain_type') and self._point_in_terrain_shape(
+                            c.body.position.x, c.body.position.y, shape
+                        ):
+                            terrain_type = shape.terrain_type
+                            break
+                
                 # Apply hazard effect (scaled by resilience)
-                kill_prob = 0.5 * (1.0 - c.genome.resilience * 0.7)
-                if random.random() < kill_prob:
-                    c.dead = True
-                else:
-                    # Penalties
-                    c.genome.max_speed *= 0.95
-                    c._breed_cd += 1.0
+                # RL creatures track hazards in episode_info
+                c.suffer_hazard(0.5, terrain_type=terrain_type)
 
         c.set_env_mods(speed_mult, cooldown_bonus, ambient_hazard)
 
@@ -808,29 +950,51 @@ class TopDownScene:
                     state['current_hazard'] *= 1.3
             
             # Layer 5: Creature feedback
-            # Optimize: only count creatures every 0.5 seconds to reduce CPU load
+            # Optimize: only count creatures every 1.0 seconds to further reduce CPU load
             state.setdefault('creature_count_update_timer', 0.0)
             state['creature_count_update_timer'] += dt
-            if state['creature_count_update_timer'] >= 0.5:  # Update every 0.5 seconds
+            if state['creature_count_update_timer'] >= 1.0:  # Update every 1.0 seconds (increased from 0.5)
                 state['creature_count_update_timer'] = 0.0
                 creature_count = 0
-                for creature in self.creatures:
-                    if creature.dead:
-                        continue
-                    px, py = creature.body.position.x, creature.body.position.y
-                    if self._point_in_terrain_shape(px, py, shape):
-                        creature_count += 1
+                # Quick bounding box pre-filter
+                if shape in self._terrain_bbox_cache:
+                    cx, cy, radius = self._terrain_bbox_cache[shape]
+                    for creature in self.creatures:
+                        if creature.dead:
+                            continue
+                        px, py = creature.body.position.x, creature.body.position.y
+                        dx = px - cx
+                        dy = py - cy
+                        dist_sq = dx * dx + dy * dy
+                        # Quick rejection
+                        if dist_sq > radius * radius * 1.2:
+                            continue
+                        # Precise check
+                        if self._point_in_terrain_shape(px, py, shape):
+                            creature_count += 1
+                else:
+                    # Fallback if no cache
+                    for creature in self.creatures:
+                        if creature.dead:
+                            continue
+                        px, py = creature.body.position.x, creature.body.position.y
+                        if self._point_in_terrain_shape(px, py, shape):
+                            creature_count += 1
                 state['creature_count'] = creature_count
             else:
                 creature_count = state.get('creature_count', 0)
             
-            # Resource consumption
+            # Resource consumption (optimized - less aggressive consumption)
             if creature_count > 0 and state['base_resource'] > 0:
-                consumption = min(0.05 * creature_count * dt, state['current_resource'] * 0.5)
-                state['current_resource'] = max(state['base_resource'] * 0.5, state['current_resource'] - consumption)
+                # Further reduced consumption rate for better resource availability
+                consumption = min(0.02 * creature_count * dt, state['current_resource'] * 0.25)  # Reduced from 0.03 to 0.02, and from 0.3 to 0.25
+                state['current_resource'] = max(state['base_resource'] * 0.65, state['current_resource'] - consumption)  # Slightly higher floor (0.65 vs 0.6)
+                # Track resource consumption
+                self.stats['resource_consumed'] += consumption
             elif creature_count == 0 and state['current_resource'] < state['base_resource']:
-                # Recover when no creatures
-                state['current_resource'] = min(state['base_resource'], state['current_resource'] + 0.02 * dt)
+                # Faster recovery when no creatures for better resource flow
+                recovery_rate = 0.20 if state['base_resource'] > 0.4 else 0.25  # Faster recovery (increased from 0.10-0.15 to 0.20-0.25)
+                state['current_resource'] = min(state['base_resource'], state['current_resource'] + recovery_rate * dt)
             
             # Pollution accumulation (for hazard terrains)
             if creature_count >= 10 and state['base_hazard'] > 0:
@@ -932,18 +1096,110 @@ class TopDownScene:
         
         # Reinitialize dynamic state
         self._init_terrain_dynamic_state(shape, new_type)
+        
+        # Update cache
+        self._cache_terrain_centers()
 
+    def _get_nearby_creatures(self, creature: Creature, radius: float = 300.0) -> List[Creature]:
+        """Get nearby creatures within radius.
+        
+        Args:
+            creature: Reference creature
+            radius: Search radius in pixels
+            
+        Returns:
+            List of nearby creatures
+        """
+        nearby = []
+        px, py = creature.body.position.x, creature.body.position.y
+        
+        for other in self.creatures:
+            if other.dead or other is creature:
+                continue
+            ox, oy = other.body.position.x, other.body.position.y
+            dist_sq = (px - ox) ** 2 + (py - oy) ** 2
+            if dist_sq < radius * radius:
+                nearby.append(other)
+        
+        return nearby
+    
     def _update_creatures(self, dt: float):
         """Update all creatures with terrain effects, affinity, and physics.
+        
+        Optimized with affinity caching and early exits.
 
         Args:
             dt: Time delta since last frame
         """
+        # Update affinity cache timer
+        self._affinity_cache_timer += dt
+        should_update_affinity = self._affinity_cache_timer >= self._affinity_cache_interval
+        
+        if should_update_affinity:
+            self._affinity_cache_timer = 0.0
+            self._affinity_cache.clear()  # Clear cache for recalculation
+        
         for c in self.creatures:
-            # Update env mods from terrain memberships and apply resource/hazard effects
-            self._apply_terrain_env(c, dt)
-            c.set_affinity(self._compute_affinity(c))
-            c.update(dt)
+            if c.dead:
+                continue
+            
+            # RL creatures need special update
+            if self.use_rl and isinstance(c, RLCreature) and c.use_rl:
+                # Track terrain exploration for RL creatures
+                terrain_type_at_pos = self._find_terrain_type_at(c.body.position.x, c.body.position.y)
+                if terrain_type_at_pos and hasattr(c, '_explored_terrains'):
+                    if terrain_type_at_pos not in c._explored_terrains:
+                        c.episode_info['explored_new'] = True
+                        c._explored_terrains.add(terrain_type_at_pos)
+                
+                # For RL creatures, compute affinity still needed for some internal tracking
+                # but action is controlled by RL
+                nearby_creatures = self._get_nearby_creatures(c, radius=300.0)
+                
+                # Check for resources before applying effects (for near_resource tracking)
+                if hasattr(c, 'episode_info'):
+                    # Get terrain at position
+                    terrain_shapes_at_pos = []
+                    px, py = c.body.position.x, c.body.position.y
+                    for terrain_type, shapes in self.terrain_shapes.items():
+                        for shape in shapes:
+                            if isinstance(shape, pymunk.Circle):
+                                dx = px - shape.body.position.x
+                                dy = py - shape.body.position.y
+                                if dx * dx + dy * dy <= shape.radius * shape.radius:
+                                    terrain_shapes_at_pos.append(shape)
+                    
+                    # Check resource value
+                    total_resource = 0.0
+                    for shape in terrain_shapes_at_pos:
+                        state = self.terrain_dynamic_state.get(shape, {})
+                        if state:
+                            total_resource += state.get('current_resource', 0.0)
+                        elif hasattr(shape, 'resource_value'):
+                            total_resource += shape.resource_value
+                    if total_resource > 0.01:
+                        c.episode_info['near_resource'] = True
+                
+                self._apply_terrain_env(c, dt)  # Still apply terrain effects (this sets gained_resource)
+                c.update(dt, scene=self, nearby_creatures=nearby_creatures)
+            else:
+                # Regular gene-driven creatures
+                self._apply_terrain_env(c, dt)
+                
+                # Use cached affinity if available, otherwise compute
+                if should_update_affinity:
+                    affinity = self._compute_affinity(c)
+                    self._affinity_cache[c] = affinity
+                    c.set_affinity(affinity)
+                elif c in self._affinity_cache:
+                    c.set_affinity(self._affinity_cache[c])
+                else:
+                    # Fallback: compute if not in cache
+                    affinity = self._compute_affinity(c)
+                    self._affinity_cache[c] = affinity
+                    c.set_affinity(affinity)
+                
+                c.update(dt)
 
     def _cull_dead(self) -> None:
         """Remove dead creatures from simulation and physics space."""
@@ -951,6 +1207,16 @@ class TopDownScene:
         new_map: Dict[pymunk.Body, Creature] = {}
         for c in self.creatures:
             if c.dead:
+                # Track death
+                self.stats['deaths_total'] += 1
+                
+                # Finalize RL episode if needed
+                if self.use_rl and isinstance(c, RLCreature) and c.use_rl:
+                    c._finalize_episode(self, natural_death=(c.age >= c.genome.lifespan_secs))
+                    # Record episode in visualizer
+                    if self.rl_visualizer and hasattr(c, 'episode_reward') and c.episode_steps > 0:
+                        self.rl_visualizer.record_episode(c.episode_reward, c.episode_steps)
+                
                 try:
                     self.space.remove(c.shape, c.body)
                 except Exception:
@@ -962,20 +1228,39 @@ class TopDownScene:
         self.body_to_creature = new_map
 
     def _breed_encounters(self) -> None:
-        """Check for breeding opportunities between same-species creatures."""
+        """Check for breeding opportunities between same-species creatures.
+        
+        Optimized with species comparison caching.
+        """
         if len(self.creatures) >= self.pop_cap:
             return
         births = 0
         n = len(self.creatures)
-        for i in range(n):
+        
+        # Pre-filter: only check creatures that are potentially ready
+        potential_breeders = [c for c in self.creatures 
+                             if not c.dead and c._breed_cd <= BREED_WINDOW_SECONDS]
+        
+        if len(potential_breeders) < 2:
+            return
+        
+        for i in range(len(potential_breeders)):
             if births >= MAX_BIRTHS_PER_FRAME or len(self.creatures) >= self.pop_cap:
                 break
-            a = self.creatures[i]
-            for j in range(i + 1, n):
+            a = potential_breeders[i]
+            a_species_id = id(a.genome)  # Use object id as quick hash
+            
+            for j in range(i + 1, len(potential_breeders)):
                 if births >= MAX_BIRTHS_PER_FRAME or len(self.creatures) >= self.pop_cap:
                     break
-                b = self.creatures[j]
-                if a.genome.species_id != b.genome.species_id:
+                b = potential_breeders[j]
+                
+                # Quick species check using cache
+                cache_key = (a_species_id, id(b.genome))
+                if cache_key not in self._species_cache:
+                    self._species_cache[cache_key] = is_same_species(a.genome.to_dict(), b.genome.to_dict())
+                
+                if not self._species_cache[cache_key]:
                     continue
                 # Relaxed readiness: one ready and the other near-ready also allowed
                 a_ready = a._breed_cd <= 0.0
@@ -990,33 +1275,81 @@ class TopDownScene:
                 dist2 = (pa.x - pb.x) * (pa.x - pb.x) + (pa.y - pb.y) * (pa.y - pb.y)
                 threshold = a.genome.body_radius + b.genome.body_radius + BREED_PROXIMITY_BONUS
                 if dist2 <= threshold * threshold:
-                    # Breeding success influenced by beauty (average of parents)
+                    # Breeding success influenced by beauty and breeding_timing (average of parents)
+                    # Use cached GeneEffects instance
+                    genome_a_dict = a.genome.to_dict()
+                    genome_b_dict = b.genome.to_dict()
                     beauty_avg = 0.5 * (a.genome.beauty + b.genome.beauty)
-                    base_p = 0.70
-                    bonus = 0.5 * (beauty_avg - 0.5)  # Range: [-0.25, +0.25]
-                    success_p = max(0.2, min(0.95, base_p + bonus))
+                    timing_avg = 0.5 * (genome_a_dict.get("breeding_timing", 0.5) + genome_b_dict.get("breeding_timing", 0.5))
+                    success_mod = self._gene_effects_cache.get_breeding_success_modifier(genome_a_dict) * 0.5 + \
+                                 self._gene_effects_cache.get_breeding_success_modifier(genome_b_dict) * 0.5
+                    base_p = 0.85 * success_mod  # Increased from 0.70 to 0.85 for higher breeding success
+                    bonus = 0.5 * (beauty_avg - 0.5) + 0.2 * (timing_avg - 0.5)  # Range: [-0.35, +0.35]
+                    success_p = max(0.3, min(0.98, base_p + bonus))  # Increased min from 0.2 to 0.3, max from 0.95 to 0.98
                     if random.random() < success_p:
-                        child = spawn_child(self.space, a, b)
+                        # Spawn child - use RL creature if parents are RL
+                        if self.use_rl and isinstance(a, RLCreature) and isinstance(b, RLCreature):
+                            # For RL creatures, spawn regular child for now
+                            # (could use RL child spawning logic if needed)
+                            child = spawn_child(self.space, a, b)
+                        else:
+                            child = spawn_child(self.space, a, b)
+                        
+                        # If RL mode, wrap child as RLCreature
+                        if self.use_rl and not isinstance(child, RLCreature):
+                            # Convert to RL creature
+                            child_genome = child.genome
+                            child_body = child.body
+                            child_shape = child.shape
+                            # Remove old creature
+                            self.space.remove(child_body, child_shape)
+                            # Create RL creature
+                            child = RLCreature(
+                                self.space,
+                                (child_body.position.x, child_body.position.y),
+                                genome=child_genome,
+                                global_manager=self.rl_manager,
+                                use_rl=True
+                            )
+                        
                         self.creatures.append(child)
                         self.body_to_creature[child.body] = child
+                        
+                        # Track offspring for RL creatures
+                        if isinstance(a, RLCreature) and a.use_rl:
+                            a.episode_info['offspring_count'] = a.episode_info.get('offspring_count', 0) + 1
+                        if isinstance(b, RLCreature) and b.use_rl:
+                            b.episode_info['offspring_count'] = b.episode_info.get('offspring_count', 0) + 1
                         # Shorter cooldowns after breeding
                         a._breed_cd = random.uniform(2.0, 4.0)
                         b._breed_cd = random.uniform(2.0, 4.0)
                         births += 1
 
     def _predation_encounters(self) -> None:
-        """Check for predation opportunities between different species."""
-        n = len(self.creatures)
+        """Check for predation opportunities between different species.
+        
+        Optimized with species comparison caching and early filtering.
+        """
+        # Pre-filter: only living creatures
+        living = [c for c in self.creatures if not c.dead]
+        if len(living) < 2:
+            return
+        
+        n = len(living)
         for i in range(n):
-            a = self.creatures[i]
-            if a.dead:
-                continue
+            a = living[i]
+            a_species_id = id(a.genome)
+            
             for j in range(i + 1, n):
-                b = self.creatures[j]
-                if b.dead:
-                    continue
+                b = living[j]
+                
+                # Quick species check using cache
+                cache_key = (a_species_id, id(b.genome))
+                if cache_key not in self._species_cache:
+                    self._species_cache[cache_key] = is_same_species(a.genome.to_dict(), b.genome.to_dict())
+                
                 # Prevent same-species predation
-                if a.genome.species_id == b.genome.species_id:
+                if self._species_cache[cache_key]:
                     continue
                 pa = a.body.position
                 pb = b.body.position
@@ -1033,12 +1366,192 @@ class TopDownScene:
                     predator, prey = b, a
                 else:
                     continue
-                # Probability based on aggression vs prey caution
-                p = 0.35 + 0.45 * predator.genome.aggression - 0.30 * prey.genome.caution
-                if random.random() < max(0.05, min(0.95, p)):
+                # Probability based on aggression vs prey caution (reduced for lower mortality)
+                p = 0.20 + 0.30 * predator.genome.aggression - 0.40 * prey.genome.caution  # Reduced base from 0.35 to 0.20, coefficient from 0.45 to 0.30, caution bonus from 0.30 to 0.40
+                if random.random() < max(0.03, min(0.85, p)):  # Reduced max from 0.95 to 0.85
+                    # Track predation
+                    self.stats['predations_total'] += 1
                     prey.dead = True
                     predator.devour(prey)
 
+    def _spawn_rl_creatures(self, count: int, area: Tuple[int, int, int, int]) -> List[Creature]:
+        """Spawn RL-enabled creatures from three distinct species with high speed.
+        
+        Args:
+            count: Number of creatures to spawn
+            area: Tuple of (x0, y0, x1, y1) bounding box
+            
+        Returns:
+            List of created RL creatures
+        """
+        if not self.use_rl or not RL_AVAILABLE:
+            # Fallback to regular creatures (with 3 species, high speed)
+            return spawn_creatures(self.space, count=count, area=area, num_species=3, high_speed=True)
+        
+        from .genetics import generate_base_species_genome, get_gene_def
+        
+        x0, y0, x1, y1 = area
+        area_width = x1 - x0
+        area_height = y1 - y0
+        creatures: List[Creature] = []
+        
+        # Create base genomes for three species
+        base_genomes = []
+        for species_idx in range(3):
+            base_genome = generate_base_species_genome(species_idx, high_speed=True)
+            base_genomes.append(base_genome)
+        
+        # Distribute creatures evenly across species
+        creatures_per_species = count // 3
+        remainder = count % 3
+        
+        # Calculate cluster radius for species grouping
+        cluster_radius = min(area_width, area_height) * 0.15  # 15% of smaller dimension
+        
+        for species_idx in range(3):
+            num_this_species = creatures_per_species
+            if species_idx < remainder:
+                num_this_species += 1
+            
+            # Choose cluster center: left, center, or right region
+            if species_idx == 0:
+                center_x = x0 + area_width * 0.25
+                center_y = y0 + area_height * 0.5
+            elif species_idx == 1:
+                center_x = x0 + area_width * 0.5
+                center_y = y0 + area_height * 0.5
+            else:  # species_idx == 2
+                center_x = x0 + area_width * 0.75
+                center_y = y0 + area_height * 0.5
+            
+            # Add small random offset
+            center_x += random.uniform(-cluster_radius * 0.3, cluster_radius * 0.3)
+            center_y += random.uniform(-cluster_radius * 0.3, cluster_radius * 0.3)
+            center_x = max(x0 + cluster_radius, min(x1 - cluster_radius, center_x))
+            center_y = max(y0 + cluster_radius, min(y1 - cluster_radius, center_y))
+            
+            base_genome = base_genomes[species_idx]
+            
+            # Spawn in cluster around center
+            for _ in range(num_this_species):
+                angle = random.uniform(0, 2 * math.pi)
+                radius = random.uniform(0, cluster_radius * 0.8)
+                x = center_x + radius * math.cos(angle)
+                y = center_y + radius * math.sin(angle)
+                x = max(x0, min(x1, x))
+                y = max(y0, min(y1, y))
+                
+                # Add small random variations to base genome
+                varied_genome = base_genome.copy()
+                for gene_name in varied_genome.keys():
+                    if gene_name == "species_id":
+                        continue
+                    variation = random.uniform(-0.05, 0.05)
+                    gene_def = get_gene_def(gene_name)
+                    if gene_def:
+                        min_val, max_val = gene_def.default_range
+                        new_val = varied_genome[gene_name] * (1.0 + variation)
+                        varied_genome[gene_name] = max(min_val, min(max_val, new_val))
+                
+                creature = RLCreature(
+                    self.space,
+                    (x, y),
+                    genome=Genome(varied_genome),
+                    global_manager=self.rl_manager,
+                    use_rl=True
+                )
+                creatures.append(creature)
+                self.body_to_creature[creature.body] = creature
+        
+        return creatures
+    
+    def _cache_terrain_centers(self):
+        """Cache terrain centers and approximate bounding boxes for fast lookup."""
+        self._terrain_centers_cache.clear()
+        self._terrain_bbox_cache.clear()
+        
+        for terrain_type, shapes in self.terrain_shapes.items():
+            for shape in shapes:
+                cx = shape.body.position.x
+                cy = shape.body.position.y
+                self._terrain_centers_cache[shape] = (cx, cy)
+                
+                # Approximate bounding box (using shape radius or size estimate)
+                if isinstance(shape, pymunk.Circle):
+                    radius = shape.radius
+                else:
+                    # Estimate from polygon vertices
+                    verts = shape.get_vertices()
+                    if verts:
+                        max_dist = max(math.sqrt(v.x**2 + v.y**2) for v in verts)
+                        radius = max_dist * 1.2  # Add 20% margin
+                    else:
+                        radius = 100.0  # Default estimate
+                
+                # Cache: (center_x, center_y, radius)
+                self._terrain_bbox_cache[shape] = (cx, cy, radius)
+    
+    def _update_statistics(self):
+        """Update statistics for analysis."""
+        if len(self.creatures) == 0:
+            return
+        
+        # Current time step (approximate)
+        time_step = len(self.stats['time_steps']) * self.stats_update_interval
+        
+        # Population
+        self.stats['time_steps'].append(time_step)
+        self.stats['population'].append(len(self.creatures))
+        
+        # Average speed and age
+        speeds = [math.sqrt(c.body.velocity.x**2 + c.body.velocity.y**2) for c in self.creatures if not c.dead]
+        ages = [c.age for c in self.creatures if not c.dead]
+        if speeds:
+            self.stats['avg_speed'].append(sum(speeds) / len(speeds))
+        if ages:
+            self.stats['avg_age'].append(sum(ages) / len(ages))
+        
+        # Species count (approximate by counting different genome ids)
+        species_ids = set()
+        for c in self.creatures:
+            if not c.dead:
+                # Use a simplified species identifier (first few key genes)
+                genome_dict = c.genome.to_dict()
+                species_key = (
+                    round(genome_dict.get('aggression', 0.5), 1),
+                    round(genome_dict.get('curiosity', 0.5), 1),
+                    round(genome_dict.get('sociability', 0.5), 1),
+                )
+                species_ids.add(species_key)
+        self.stats['species_count'].append(len(species_ids))
+        
+        # Terrain resource and hazard levels
+        for terrain_type, shapes in self.terrain_shapes.items():
+            if not shapes:
+                continue
+            # Sample a few shapes to get average
+            sample_shapes = list(shapes)[:min(5, len(shapes))]
+            avg_resource = 0.0
+            avg_hazard = 0.0
+            count = 0
+            for shape in sample_shapes:
+                state = self.terrain_dynamic_state.get(shape, {})
+                if state:
+                    avg_resource += state.get('current_resource', 0.0)
+                    avg_hazard += state.get('current_hazard', 0.0)
+                    count += 1
+            if count > 0:
+                self.stats['terrain_resources'][terrain_type].append(avg_resource / count)
+                self.stats['terrain_hazards'][terrain_type].append(avg_hazard / count)
+    
+    def get_statistics(self) -> Dict:
+        """Get collected statistics.
+        
+        Returns:
+            Dictionary of statistics
+        """
+        return self.stats.copy()
+    
     def _find_terrain_type_at(self, x: float, y: float) -> str:
         """Find terrain type at given position.
 
@@ -1144,6 +1657,18 @@ class TopDownScene:
             f"  {s.hint_quit}",
             f"  G: Toggle debug/custom draw",
         ]
+        
+        # Add RL statistics if RL mode is enabled
+        if self.use_rl and self.rl_visualizer:
+            rl_stats = self.rl_visualizer.get_recent_statistics()
+            lines.append("")
+            lines.append("RL Training:")
+            if rl_stats['total_updates'] > 0:
+                lines.append(f"  Updates: {rl_stats['total_updates']}")
+                lines.append(f"  Avg Reward: {rl_stats['avg_reward']:.2f}")
+                if rl_stats['recent_episode_reward'] > 0:
+                    lines.append(f"  Episode Reward: {rl_stats['recent_episode_reward']:.2f}")
+        
         x, y = 10, 10
         for line in lines:
             surf = self.font.render(line, True, (235, 235, 235))
@@ -1161,10 +1686,77 @@ class TopDownScene:
             self._apply_water_damping()
             self._update_terrain_dynamics(dt)  # Update dynamic terrain systems
             self._update_creatures(dt)
+            
+            # RL training and synchronization
+            if self.use_rl and self.rl_manager:
+                self._rl_train_counter += 1
+                
+                # Periodic parameter synchronization
+                if self._rl_train_counter % 100 == 0:
+                    rl_creatures = [c for c in self.creatures 
+                                  if isinstance(c, RLCreature) and c.use_rl]
+                    if rl_creatures:
+                        synced = self.rl_manager.sync_to_agents(rl_creatures)
+                
+                # Record training step if training occurred
+                if self.rl_visualizer and hasattr(self.rl_manager.agent, 'training_stats'):
+                    # Check if training occurred (by checking if stats were updated)
+                    agent_stats = self.rl_manager.agent.training_stats
+                    if agent_stats.get('policy_loss'):
+                        # Get latest training stats
+                        latest_stats = {
+                            'average_reward': self.rl_manager.get_statistics().get('recent_avg_reward', 0.0),
+                            'policy_loss': agent_stats['policy_loss'][-1] if agent_stats['policy_loss'] else 0.0,
+                            'value_loss': agent_stats['value_loss'][-1] if agent_stats['value_loss'] else 0.0,
+                            'entropy': agent_stats['entropy'][-1] if agent_stats['entropy'] else 0.0,
+                            'clip_fraction': agent_stats['clip_fraction'][-1] if agent_stats['clip_fraction'] else 0.0,
+                            'buffer_size': self.rl_manager.get_statistics().get('buffer_size', 0),
+                        }
+                        self.rl_visualizer.record_training_step(
+                            latest_stats,
+                            self.rl_manager.get_statistics().get('total_updates', 0)
+                        )
+                
+                # Periodic training statistics
+                if self._rl_train_counter % 500 == 0:
+                    stats = self.rl_manager.get_statistics()
+                    # Can be logged or displayed in HUD
+                    if stats['total_updates'] > 0:
+                        avg_reward = stats.get('recent_avg_reward', 0.0)
+                        print(f"[RL] Updates: {stats['total_updates']}, "
+                              f"Buffer: {stats['buffer_size']}, "
+                              f"AvgReward: {avg_reward:.3f}")
+                        
+                        # Record episode stats from RL creatures
+                        if self.rl_visualizer:
+                            for c in self.creatures:
+                                if isinstance(c, RLCreature) and c.use_rl and hasattr(c, 'episode_reward'):
+                                    if c.episode_steps > 0:
+                                        self.rl_visualizer.record_episode(c.episode_reward, c.episode_steps)
             self._breed_encounters()
             self._predation_encounters()
             self._cull_dead()
             self._maybe_rebuild_terrains(dt)
+            
+            # Update statistics periodically
+            self.stats_timer += dt
+            if self.stats_timer >= self.stats_update_interval:
+                self._update_statistics()
+                self.stats_timer = 0.0
+            
+            # Clear species cache periodically to prevent memory growth
+            if hasattr(self, '_species_cache_clear_timer'):
+                self._species_cache_clear_timer += dt
+                if self._species_cache_clear_timer >= 10.0:  # Clear every 10 seconds
+                    self._species_cache_clear_timer = 0.0
+                    # Keep cache size reasonable (keep last 1000 entries)
+                    if len(self._species_cache) > 1000:
+                        # Clear half of cache (simple FIFO replacement)
+                        keys_to_remove = list(self._species_cache.keys())[:500]
+                        for key in keys_to_remove:
+                            del self._species_cache[key]
+            else:
+                self._species_cache_clear_timer = 0.0
 
             self.space.step(dt)
 

@@ -466,23 +466,30 @@ def build_tiled_terrain(space: pymunk.Space, cfg: Config, terrain_type: str,
 # hazard_level: probability of negative effects per second while on terrain
 # Base terrain properties (resource_value, hazard_level)
 # These are base values that will be modified by dynamic systems
+# Base terrain properties (resource_value, hazard_level)
+# Optimized for better resource gameplay - higher values, clearer distinction
 TERRAIN_PROPERTIES = {
-    'ice': (0.0, 0.05),      # No resources, slight hazard (cold)
-    'sand': (0.15, 0.0),     # Some resources, no hazard
-    'bounce': (0.05, 0.0),   # Minimal resources, no hazard
-    'water': (0.25, 0.10),   # Good resources, some hazard (drowning risk)
-    'mud': (0.10, 0.08),     # Some resources, moderate hazard (stuck)
-    'boost': (0.20, 0.0),    # Good resources, no hazard
-    'toxic': (0.0, 0.25),    # No resources, high hazard
-    'meadow': (0.30, 0.02),  # Excellent resources, minimal hazard
-    # New resource terrains
-    'crystal': (0.35, 0.12), # High resources, moderate hazard
-    'forest': (0.22, 0.04),  # Medium-high resources, low hazard
-    'geyser': (0.28, 0.15),  # High resources, moderate-high hazard
-    # New hazard terrains
-    'lava': (0.08, 0.40),    # Low resources, extreme hazard
-    'spike': (0.0, 0.30),    # No resources, high hazard
-    'storm': (0.0, 0.20),    # No resources, medium-high hazard
+    # Neutral/Low Resource Terrains
+    'ice': (0.02, 0.03),      # Minimal resources, reduced hazard (from 0.05 to 0.03)
+    'sand': (0.25, 0.0),      # Moderate resources, no hazard
+    'bounce': (0.12, 0.0),    # Low resources, no hazard
+    
+    # Moderate Resource Terrains
+    'water': (0.35, 0.06),    # Good resources, reduced hazard (from 0.10 to 0.06)
+    'mud': (0.18, 0.05),      # Moderate resources, reduced hazard (from 0.08 to 0.05)
+    'boost': (0.30, 0.0),     # Good resources, no hazard
+    'forest': (0.40, 0.03),   # Good resources, reduced hazard (from 0.05 to 0.03)
+    
+    # High Resource Terrains (Resource-Type)
+    'meadow': (0.55, 0.0),    # Excellent resources, no hazard
+    'crystal': (0.65, 0.0),   # Very high resources, no hazard
+    'geyser': (0.45, 0.10),   # High resources, reduced hazard (from 0.15 to 0.10)
+    
+    # Hazard-Only Terrains (Hazard-Type) - Reduced hazards for better survival
+    'toxic': (0.05, 0.25),    # Minimal resources, reduced hazard (from 0.35 to 0.25)
+    'lava': (0.0, 0.30),      # No resources, reduced hazard (from 0.45 to 0.30)
+    'spike': (0.0, 0.28),     # No resources, reduced hazard (from 0.40 to 0.28)
+    'storm': (0.05, 0.25),    # Minimal resources, reduced hazard (from 0.35 to 0.25)
 }
 
 

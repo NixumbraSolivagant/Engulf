@@ -5,6 +5,18 @@ from dataclasses import dataclass
 
 @dataclass
 class Config:
+    """Configuration parameters for the simulation.
+    
+    Attributes:
+        terrain_friction_ice: Friction coefficient for ice terrain
+        terrain_elasticity_ice: Elasticity coefficient for ice terrain
+        terrain_friction_sand: Friction coefficient for sand terrain
+        terrain_elasticity_sand: Elasticity coefficient for sand terrain
+        terrain_friction_bounce: Friction coefficient for bounce terrain
+        terrain_elasticity_bounce: Elasticity coefficient for bounce terrain
+        language: Current language setting ('en' or 'zh')
+        use_rl: Whether to use reinforcement learning for all creatures
+    """
     """Configuration parameters for terrain and UI settings.
 
     Attributes:
@@ -36,3 +48,6 @@ class Config:
 
     water_damping_linear: float = 0.90
     water_damping_angular: float = 0.90
+    
+    # RL settings
+    use_rl: bool = False  # Enable RL mode (requires RL_AVAILABLE)
