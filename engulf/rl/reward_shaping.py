@@ -18,11 +18,15 @@ class PersonalizedReward:
         self.genome_dict = genome_dict
         
         # Compute reward weights based on genes
+        # Increased exploration weight significantly to encourage exploration
+        exploration_drive = genome_dict.get('exploration_drive', 0.5)
+        curiosity = genome_dict.get('curiosity', 0.5)
         self.reward_weights = {
             'survival': 1.0,
-            'resource': 0.5 + 0.5 * genome_dict.get('curiosity', 0.5),
-            'exploration': 0.3 + 0.7 * genome_dict.get('exploration_drive', 0.5),
-            'movement': 1.0,  # Always reward movement
+            'resource': 0.5 + 0.5 * curiosity,
+            'exploration': 0.8 + 1.2 * exploration_drive,  # Increased from 0.3-1.0 to 0.8-2.0 (much stronger!)
+            'movement': 1.5,  # Increased from 1.0 to 1.5 (encourage active movement)
+            'distance': 1.2,  # New: reward for traveling distance
             'reproduction': 0.5 + 0.5 * genome_dict.get('fertility', 0.5),
             'safety': 0.3 + 0.7 * genome_dict.get('caution', 0.5),
             'growth': 0.4 + 0.6 * genome_dict.get('metabolism', 0.5),
@@ -68,8 +72,17 @@ class RewardShaping:
             'safety': 0.0,
             'growth': 0.0,
             'social': 0.0,
-            'movement': 0.05,  # Increased movement reward (encourage exploration)
+            'movement': 0.08,  # Increased movement reward (encourage exploration)
+            'distance': 0.0,  # Distance traveled reward (calculated dynamically)
         }
+        
+        # Add distance-based exploration reward (reward for being far from spawn)
+        # Reward based on current distance from spawn, not cumulative (to prevent explosion)
+        distance = info.get('distance_traveled', 0.0)
+        if distance > 100.0:  # Only reward if traveled significant distance
+            # Scale reward with distance, but with diminishing returns
+            # Uses square root to prevent explosion while still rewarding exploration
+            rewards['distance'] = min(1.0 + (distance - 100.0) * 0.002, 3.0)  # 1.0-3.0 range
         
         # Resource reward - increased to make it easier to get positive feedback
         if info.get('gained_resource', False):
@@ -79,12 +92,24 @@ class RewardShaping:
         elif info.get('near_resource', False):
             rewards['resource'] = 0.5  # Small continuous reward for proximity
         
-        # Exploration reward - make it more frequent
+        # Exploration reward - make it much more generous and frequent
+        exploration_reward = 0.0
+        
+        # Priority 1: New terrain exploration (highest reward)
         if info.get('explored_new', False):
-            rewards['exploration'] = 5.0
-        # Small reward for movement/exploration activity
+            exploration_reward = 15.0  # Increased from 5.0 to 15.0 (3x!)
+        # Priority 2: Movement-based exploration (if not new terrain)
         elif info.get('moved_significantly', False):
-            rewards['exploration'] = 0.5  # Increased reward for active movement
+            # Scale exploration reward with movement distance
+            movement_dist = info.get('movement_distance', 5.0)
+            # Base reward + bonus for longer distances
+            exploration_reward = 0.8 + 0.3 * min(movement_dist / 50.0, 2.0)  # 0.8-1.4 reward range
+        
+        # Additional reward for speed (faster = more exploration) - always applies if moving fast
+        if info.get('high_speed', False):
+            exploration_reward += 0.5  # Bonus for fast movement
+        
+        rewards['exploration'] = exploration_reward
         
         # Reproduction reward
         if info.get('bred_successfully', False):

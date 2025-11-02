@@ -50,4 +50,4 @@ class Config:
     water_damping_angular: float = 0.90
     
     # RL settings
-    use_rl: bool = False  # Enable RL mode (requires RL_AVAILABLE)
+    use_rl: bool = True  # Enable RL mode (requires RL_AVAILABLE)

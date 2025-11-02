@@ -83,8 +83,14 @@ class RLCreature(Creature):
                 'explored_new': False,  # Track exploration
                 'near_resource': False,  # Track resource proximity
                 'moved_significantly': False,  # Track movement
+                'movement_distance': 0.0,  # Track movement distance for exploration reward
+                'high_speed': False,  # Track high-speed movement
+                'distance_traveled': 0.0,  # Cumulative distance from spawn
             }
             self._explored_terrains = set()  # Track explored terrain types
+            self._spawn_position = position  # Track spawn position for distance calculation
+            self._cumulative_distance = 0.0  # Track total distance traveled
+            self._last_distance_reward = 0.0  # Track last distance reward value
             
             # For state encoding
             self._nearby_creatures_cache = []
@@ -130,6 +136,36 @@ class RLCreature(Creature):
         
         # Execute action
         action_info = self.action_executor.execute(self, action, dt)
+        
+        # Track movement and speed before computing reward
+        if self.last_position is not None:
+            current_pos = (self.body.position.x, self.body.position.y)
+            movement_dist = ((current_pos[0] - self.last_position[0])**2 + 
+                           (current_pos[1] - self.last_position[1])**2)**0.5
+            
+            if movement_dist > 5.0:  # Moved significantly (> 5 pixels)
+                self.episode_info['moved_significantly'] = True
+                self.episode_info['movement_distance'] = movement_dist
+                
+                # Track cumulative distance traveled
+                self._cumulative_distance += movement_dist
+                
+                # Reward high-speed movement (encourages active exploration)
+                speed = movement_dist / (dt if dt > 0 else 0.016)  # pixels per second
+                if speed > 100.0:  # Fast movement (> 100 px/s)
+                    self.episode_info['high_speed'] = True
+                
+                # Distance from spawn (for distance-based reward)
+                if hasattr(self, '_spawn_position'):
+                    dist_from_spawn = ((current_pos[0] - self._spawn_position[0])**2 +
+                                     (current_pos[1] - self._spawn_position[1])**2)**0.5
+                    self.episode_info['distance_traveled'] = dist_from_spawn
+                else:
+                    self.episode_info['distance_traveled'] = self._cumulative_distance
+            
+            self.last_position = current_pos
+        else:
+            self.last_position = (self.body.position.x, self.body.position.y)
         
         # Store for experience collection
         if self.last_state is not None:
@@ -183,16 +219,8 @@ class RLCreature(Creature):
         # Add step-based rewards
         base_rewards['survival'] = 0.05  # Reduced base survival (match reward_shaping.py)
         
-        # Movement reward - reward active movement
-        if self.last_position is not None:
-            current_pos = (self.body.position.x, self.body.position.y)
-            movement_dist = ((current_pos[0] - self.last_position[0])**2 + 
-                           (current_pos[1] - self.last_position[1])**2)**0.5
-            if movement_dist > 5.0:  # Moved significantly (> 5 pixels)
-                self.episode_info['moved_significantly'] = True
-            self.last_position = current_pos
-        else:
-            self.last_position = (self.body.position.x, self.body.position.y)
+        # Movement tracking is now done in update() method before calling _compute_reward
+        # So episode_info should already have movement_distance, high_speed, etc. set
         
         # Check for resource consumption
         if hasattr(self, '_last_body_radius'):
@@ -205,14 +233,21 @@ class RLCreature(Creature):
         reward = self.reward_shaper.calculate(base_rewards)
         
         # Reset episode info for next step (will be updated by events)
+        # Keep cumulative stats, reset per-step flags
         self.episode_info = {
-            'resources_gained': 0,
+            'resources_gained': self.episode_info.get('resources_gained', 0),
             'hazards_encountered': 0,
             'hazards_avoided': 0,
-            'offspring_count': 0,
-            'growth_amount': self.episode_info['growth_amount'],
+            'offspring_count': self.episode_info.get('offspring_count', 0),
+            'growth_amount': self.episode_info.get('growth_amount', 0.0),
             'moved_significantly': False,  # Reset movement flag
             'near_resource': False,  # Reset resource proximity flag
+            'movement_distance': 0.0,  # Reset movement distance
+            'high_speed': False,  # Reset speed flag
+            'distance_traveled': self.episode_info.get('distance_traveled', 0.0),  # Keep cumulative
+            'gained_resource': False,  # Reset resource gain flag
+            'resource_value': 0.0,  # Reset resource value
+            'explored_new': False,  # Reset exploration flag
         }
         
         return reward

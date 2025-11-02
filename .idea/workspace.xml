@@ -4,7 +4,31 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="9daa73d9-3052-4423-8e9b-1002c38eef81" name="更改" comment="First">
+    <list default="true" id="9daa73d9-3052-4423-8e9b-1002c38eef81" name="更改" comment="add Rl">
+      <change afterPath="$PROJECT_DIR$/=3.5.0" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/ANALYSIS.md" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/RL_INTEGRATION_COMPLETE.md" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/RL_USAGE.md" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/RL_VISUALIZATION.md" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/TEST_RESULTS.md" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/engulf/genetics.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/engulf/rl/README.md" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/engulf/rl/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/engulf/rl/action_executor.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/engulf/rl/experience_buffer.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/engulf/rl/global_manager.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/engulf/rl/integration_example.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/engulf/rl/network.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/engulf/rl/optimizer.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/engulf/rl/ppo.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/engulf/rl/reward_shaping.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/engulf/rl/rl_creature.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/engulf/rl/state_encoder.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/engulf/rl/utils.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/engulf/rl/visualizer.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/engulf/stats_reporter.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/rl_training_report.png" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/simulation_stats.png" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/engulf/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/engulf/config.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/engulf/creatures.py" beforeDir="false" afterPath="$PROJECT_DIR$/engulf/creatures.py" afterDir="false" />
@@ -60,7 +84,7 @@
       <option name="presentableId" value="Default" />
       <updated>1761919874180</updated>
       <workItem from="1761919875236" duration="1229000" />
-      <workItem from="1761987766680" duration="1288000" />
+      <workItem from="1761987766680" duration="1906000" />
     </task>
     <task id="LOCAL-00001" summary="First">
       <option name="closed" value="true" />
@@ -70,7 +94,15 @@
       <option name="project" value="LOCAL" />
       <updated>1761987938609</updated>
     </task>
-    <option name="localTasksCounter" value="2" />
+    <task id="LOCAL-00002" summary="add Rl">
+      <option name="closed" value="true" />
+      <created>1762076197124</created>
+      <option name="number" value="00002" />
+      <option name="presentableId" value="LOCAL-00002" />
+      <option name="project" value="LOCAL" />
+      <updated>1762076197124</updated>
+    </task>
+    <option name="localTasksCounter" value="3" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -78,6 +110,7 @@
   </component>
   <component name="VcsManagerConfiguration">
     <MESSAGE value="First" />
-    <option name="LAST_COMMIT_MESSAGE" value="First" />
+    <MESSAGE value="add Rl" />
+    <option name="LAST_COMMIT_MESSAGE" value="add Rl" />
   </component>
 </project>
