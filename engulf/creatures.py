@@ -140,19 +140,21 @@ class Genome:
         return Genome(gene_dict)
 
     @staticmethod
-    def breed(a: "Genome", b: "Genome") -> "Genome":
-        """Breed two genomes to create offspring with mutations.
+    def breed(a: "Genome", b: "Genome", fitness_a: float = 0.5, fitness_b: float = 0.5) -> "Genome":
+        """Breed two genomes to create offspring with mutations and fitness weighting.
 
         Args:
             a: First parent genome
             b: Second parent genome (must have same species_id)
+            fitness_a: Normalized fitness score of parent A (0.0-1.0)
+            fitness_b: Normalized fitness score of parent B (0.0-1.0)
 
         Returns:
             New genome with mixed traits and mutations
         """
         parent_a_dict = a.to_dict()
         parent_b_dict = b.to_dict()
-        offspring_dict = breed_genomes(parent_a_dict, parent_b_dict)
+        offspring_dict = breed_genomes(parent_a_dict, parent_b_dict, fitness_a, fitness_b)
         return Genome(offspring_dict)
 
 

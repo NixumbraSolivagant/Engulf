@@ -10,8 +10,9 @@ from ..creatures import Creature, Genome
 from .state_encoder import StateEncoder
 from .action_executor import ActionExecutor
 from .reward_shaping import PersonalizedReward, RewardShaping
-from .global_manager import GlobalRLManager
 from .ppo import PPOAgent
+from .evolution_supervisor import EvolutionSupervisor, FitnessMetrics
+from .experience_buffer import ExperienceBuffer, Experience
 
 
 class RLCreature(Creature):
@@ -23,7 +24,7 @@ class RLCreature(Creature):
     
     def __init__(self, space, position: Tuple[float, float],
                  genome: Optional[Genome] = None,
-                 global_manager: Optional[GlobalRLManager] = None,
+                 global_manager: Optional = None,  # Kept for compatibility, but not used
                  use_rl: bool = True):
         """Initialize RL creature.
         
@@ -31,14 +32,13 @@ class RLCreature(Creature):
             space: Pymunk physics space
             position: Initial position
             genome: Genome (None for random)
-            global_manager: Global RL manager (None = local agent)
+            global_manager: Deprecated - kept for compatibility only
             use_rl: Whether to use RL (if False, falls back to gene-driven)
         """
         # Initialize base creature
         super().__init__(space, position, genome)
         
         self.use_rl = use_rl
-        self.global_manager = global_manager
         
         if use_rl:
             # State encoder
@@ -50,19 +50,20 @@ class RLCreature(Creature):
             # Personalized reward
             self.reward_shaper = PersonalizedReward(self.genome.to_dict())
             
-            # Local policy (synced from global)
-            if global_manager:
-                # Use global manager's agent
-                self.local_agent = None  # Will use global manager
-            else:
-                # Create local agent
-                state_dim = 210  # Will be updated after first encoding
-                action_dim = self.action_executor.get_action_space_size()
-                self.local_agent = PPOAgent(state_dim, action_dim)
+            # Create local agent (each creature has its own)
+            state_dim = 210  # Will be updated after first encoding
+            action_dim = self.action_executor.get_action_space_size()
+            self.local_agent = PPOAgent(state_dim, action_dim)
             
             # Apply gene bias to policy
-            if self.local_agent:
-                self.local_agent.policy.apply_gene_bias(self.genome.to_dict())
+            self.local_agent.policy.apply_gene_bias(self.genome.to_dict())
+            
+            # Individual experience buffer (each creature learns independently)
+            buffer_capacity = 5000  # Smaller buffer per creature
+            self.experience_buffer = ExperienceBuffer(capacity=buffer_capacity)
+            self.total_experiences = 0
+            self.train_counter = 0
+            self.train_frequency = 50  # Train every 50 experiences
             
             # RL state tracking
             self.last_state = None
@@ -91,6 +92,17 @@ class RLCreature(Creature):
             self._spawn_position = position  # Track spawn position for distance calculation
             self._cumulative_distance = 0.0  # Track total distance traveled
             self._last_distance_reward = 0.0  # Track last distance reward value
+            
+            # Evolution & fitness tracking
+            self._fitness_metrics = FitnessMetrics()
+            self._total_lifetime_reward = 0.0  # Cumulative reward over lifetime
+            self._birth_time = 0.0  # Will be set when created
+            self._unique_id = id(self)  # Unique identifier for fitness tracking
+            
+            # Individual learning rate (based on gene)
+            gene_lr = self.genome.to_dict().get('learning_rate', 0.5)
+            # Scale learning rate: 0.0 gene = 0.5x base, 1.0 gene = 1.5x base
+            self._individual_lr_multiplier = 0.5 + gene_lr  # Range: 0.5-1.5
             
             # For state encoding
             self._nearby_creatures_cache = []
@@ -124,15 +136,9 @@ class RLCreature(Creature):
         # Encode state
         state = self.state_encoder.encode(self, scene, nearby_creatures or [])
         
-        # Select action
-        if self.global_manager:
-            # Use global manager's agent
-            agent = self.global_manager.agent
-        else:
-            agent = self.local_agent
-        
-        action, log_prob = agent.select_action(state, deterministic=False)
-        value = agent.get_value(state)
+        # Select action using local agent (each creature learns independently)
+        action, log_prob = self.local_agent.select_action(state, deterministic=False)
+        value = self.local_agent.get_value(state)
         
         # Execute action
         action_info = self.action_executor.execute(self, action, dt)
@@ -172,16 +178,22 @@ class RLCreature(Creature):
             # Compute reward (delayed by one step)
             reward = self._compute_reward(self.last_state, self.last_action, state, scene)
             
-            # Collect experience
-            if self.global_manager:
-                self.global_manager.collect_experience(
-                    self.last_state,
-                    self.last_action,
-                    reward,
-                    state,
-                    False,  # Not done yet
-                    self.episode_info.copy()
-                )
+            # Collect experience in local buffer (independent learning)
+            experience = Experience(
+                self.last_state,
+                self.last_action,
+                reward,
+                state,
+                False,  # Not done yet
+                self.episode_info.copy()
+            )
+            self.experience_buffer.add(experience)
+            self.total_experiences += 1
+            
+            # Local training (each creature trains independently)
+            if len(self.experience_buffer) >= self.local_agent.config.batch_size and \
+               self.total_experiences % self.train_frequency == 0:
+                self._train_local_agent()
             
             self.episode_reward += reward
         
@@ -229,8 +241,21 @@ class RLCreature(Creature):
                 self.episode_info['growth_amount'] += base_rewards['growth']
         self._last_body_radius = self.genome.body_radius
         
+        # Add lifespan reward (encourages long-term survival)
+        # Small bonus per step that increases with age
+        lifespan_bonus = 0.01 * (1.0 + self.age / max(1.0, self.genome.lifespan_secs))
+        base_rewards['survival'] += lifespan_bonus
+        
         # Apply personalized reward
         reward = self.reward_shaper.calculate(base_rewards)
+        
+        # Update lifetime tracking
+        self._total_lifetime_reward += reward
+        self._fitness_metrics.total_reward = self._total_lifetime_reward
+        self._fitness_metrics.lifespan = self.age
+        self._fitness_metrics.exploration_score = len(self._explored_terrains)
+        self._fitness_metrics.resource_score = self.episode_info.get('resources_gained', 0)
+        self._fitness_metrics.offspring_count = self.episode_info.get('offspring_count', 0)
         
         # Reset episode info for next step (will be updated by events)
         # Keep cumulative stats, reset per-step flags
@@ -252,6 +277,70 @@ class RLCreature(Creature):
         
         return reward
     
+    def get_fitness_metrics(self) -> FitnessMetrics:
+        """Get current fitness metrics.
+        
+        Returns:
+            FitnessMetrics object
+        """
+        # Update metrics before returning
+        self._fitness_metrics.lifespan = self.age
+        self._fitness_metrics.total_reward = self._total_lifetime_reward
+        self._fitness_metrics.exploration_score = len(self._explored_terrains)
+        self._fitness_metrics.resource_score = self.episode_info.get('resources_gained', 0)
+        self._fitness_metrics.offspring_count = self.episode_info.get('offspring_count', 0)
+        # Survival bonus = lifespan / expected_lifespan
+        if self.genome.lifespan_secs > 0:
+            self._fitness_metrics.survival_bonus = self.age / self.genome.lifespan_secs
+        return self._fitness_metrics
+    
+    @property
+    def id(self) -> int:
+        """Get unique identifier for fitness tracking."""
+        return self._unique_id
+    
+    @property
+    def individual_learning_rate_multiplier(self) -> float:
+        """Get individual learning rate multiplier (based on gene)."""
+        return self._individual_lr_multiplier
+    
+    def _train_local_agent(self):
+        """Train local agent using own experience buffer.
+        
+        Each creature trains independently from its own experiences.
+        """
+        if len(self.experience_buffer) < self.local_agent.config.batch_size:
+            return
+        
+        # Sample batch from own buffer
+        batch = self.experience_buffer.sample(self.local_agent.config.batch_size)
+        
+        # Apply individual learning rate multiplier (based on gene)
+        original_lr = self.local_agent.config.learning_rate
+        adjusted_lr = original_lr * self._individual_lr_multiplier
+        
+        # Temporarily adjust learning rate
+        self.local_agent.config.learning_rate = adjusted_lr
+        
+        # Train agent
+        try:
+            stats = self.local_agent.update(batch)
+            self.train_counter += 1
+        finally:
+            # Restore original learning rate
+            self.local_agent.config.learning_rate = original_lr
+
+        # Cache latest training stats for scene aggregation (optional keys)
+        self._last_train_stats = stats or {}
+
+    def get_recent_training_stats(self) -> Dict:
+        """Return recent training stats for visualization aggregation.
+        
+        Keys may include: policy_loss, value_loss, entropy, clip_fraction.
+        Returns empty dict if none yet.
+        """
+        return getattr(self, "_last_train_stats", {})
+    
     def _finalize_episode(self, scene, natural_death: bool = False):
         """Finalize episode and compute final reward.
         
@@ -261,6 +350,28 @@ class RLCreature(Creature):
         """
         if self.last_state is None:
             return
+        
+        # Update final fitness metrics
+        final_metrics = self.get_fitness_metrics()
+        
+        # Add final experience (terminal state)
+        if self.last_state is not None and self.last_action is not None:
+            episodic_reward = self.episode_reward
+            # Add final terminal experience
+            terminal_experience = Experience(
+                self.last_state,
+                self.last_action,
+                episodic_reward,
+                self.last_state,  # Terminal state (same as last)
+                True,  # Done
+                self.episode_info.copy()
+            )
+            self.experience_buffer.add(terminal_experience)
+            self.total_experiences += 1
+            
+            # Final training step
+            if len(self.experience_buffer) >= self.local_agent.config.batch_size:
+                self._train_local_agent()
         
         # Compute final rewards
         episode_stats = {
@@ -278,16 +389,8 @@ class RLCreature(Creature):
         if not natural_death:
             episodic_reward -= 50.0
         
-        # Final experience
-        if self.global_manager:
-            self.global_manager.collect_experience(
-                self.last_state,
-                self.last_action,
-                episodic_reward,
-                self.last_state,  # Terminal state (same as last)
-                True,  # Done
-                episode_stats
-            )
+        # Note: Final terminal experience was already added in _finalize_episode above
+        # No need to add it again here
         
         # Reset episode tracking
         self.episode_reward = 0.0

@@ -34,17 +34,19 @@ from . import terrain
 from .i18n import get_strings
 from .fonts import load_font
 from .creatures import spawn_creatures, Creature, spawn_child, Genome
-from .genetics import is_same_species, are_different_species
+from .genetics import is_same_species, are_different_species, check_species_divergence, calculate_genetic_distance
 
 # RL imports (optional - only if USE_RL is enabled)
 try:
     from .rl import GlobalRLManager, RLCreature, RLTrainingVisualizer
+    from .rl.evolution_supervisor import EvolutionSupervisor
     RL_AVAILABLE = True
 except ImportError:
     RL_AVAILABLE = False
     RLCreature = None
     GlobalRLManager = None
     RLTrainingVisualizer = None
+    EvolutionSupervisor = None
 
 
 # Constants for creature behavior
@@ -133,15 +135,29 @@ class TopDownScene:
         
         # Initialize cache timers
         self._species_cache_clear_timer = 0.0
+        
+        # Species tracking (for unique colors)
+        self._existing_species: Dict[int, float] = {}  # species_id -> hue mapping
+        self._next_species_id = 3  # Start after initial 3 species
+        # Initialize existing species colors (from initial 3 species: 0=red, 1=green, 2=blue)
+        self._existing_species[0] = 0.0    # Red
+        self._existing_species[1] = 120.0  # Green
+        self._existing_species[2] = 240.0   # Blue
 
         # RL System (if enabled and available)
         self.use_rl = cfg.use_rl and RL_AVAILABLE
-        self.rl_manager = None
         self.rl_visualizer = None
+        self.evolution_supervisor = None
         if self.use_rl:
-            self.rl_manager = GlobalRLManager(state_dim=210, action_dim=12)
+            # Each creature now learns independently (no global manager)
             if RLTrainingVisualizer:
                 self.rl_visualizer = RLTrainingVisualizer(max_history=10000)
+            if EvolutionSupervisor:
+                self.evolution_supervisor = EvolutionSupervisor(
+                    selection_rate=0.2,
+                    mutation_rate=0.1,
+                    diversity_preservation=0.1
+                )
         
         # Map bodies to creatures for quick lookup (initialize before spawning)
         self.body_to_creature: Dict[pymunk.Body, Creature] = {}
@@ -1210,8 +1226,12 @@ class TopDownScene:
                 # Track death
                 self.stats['deaths_total'] += 1
                 
-                # Finalize RL episode if needed
+                # Finalize RL episode and track fitness if needed
                 if self.use_rl and isinstance(c, RLCreature) and c.use_rl:
+                    # Update fitness metrics before death
+                    if self.evolution_supervisor:
+                        fitness_metrics = c.get_fitness_metrics()
+                        self.evolution_supervisor.track_fitness(c.id, fitness_metrics)
                     c._finalize_episode(self, natural_death=(c.age >= c.genome.lifespan_secs))
                     # Record episode in visualizer
                     if self.rl_visualizer and hasattr(c, 'episode_reward') and c.episode_steps > 0:
@@ -1287,15 +1307,38 @@ class TopDownScene:
                     bonus = 0.5 * (beauty_avg - 0.5) + 0.2 * (timing_avg - 0.5)  # Range: [-0.35, +0.35]
                     success_p = max(0.3, min(0.98, base_p + bonus))  # Increased min from 0.2 to 0.3, max from 0.95 to 0.98
                     if random.random() < success_p:
-                        # Spawn child - use RL creature if parents are RL
-                        if self.use_rl and isinstance(a, RLCreature) and isinstance(b, RLCreature):
-                            # For RL creatures, spawn regular child for now
-                            # (could use RL child spawning logic if needed)
-                            child = spawn_child(self.space, a, b)
-                        else:
-                            child = spawn_child(self.space, a, b)
+                        # Pre-fetch parent genomes
+                        a_gen = a.genome.to_dict()
+                        b_gen = b.genome.to_dict()
                         
-                        # If RL mode, wrap child as RLCreature
+                        # Fitness-weighted breeding if available
+                        if self.evolution_supervisor and isinstance(a, RLCreature) and isinstance(b, RLCreature):
+                            fitness_a_raw = self.evolution_supervisor.get_fitness(a.id)
+                            fitness_b_raw = self.evolution_supervisor.get_fitness(b.id)
+                            max_fit = max(fitness_a_raw, fitness_b_raw, 1.0)
+                            inv = 1.0 / max_fit
+                            fitness_a = max(0.1, min(1.0, fitness_a_raw * inv))
+                            fitness_b = max(0.1, min(1.0, fitness_b_raw * inv))
+                            child_genome = Genome.breed(a.genome, b.genome, fitness_a, fitness_b)
+                        else:
+                            child_genome = Genome.breed(a.genome, b.genome)
+                        
+                        # Divergence check for new species
+                        child_gen = child_genome.to_dict()
+                        if check_species_divergence(child_gen, a_gen, b_gen):
+                            child_genome = self._assign_new_species(child_gen)
+                        
+                        # Create child at midpoint between parents
+                        mid_x = (pa.x + pb.x) * 0.5
+                        mid_y = (pa.y + pb.y) * 0.5
+                        child = RLCreature(
+                            self.space,
+                            (mid_x, mid_y),
+                            genome=child_genome,
+                            use_rl=True
+                        )
+                        
+                        # Ensure child is RLCreature in RL mode
                         if self.use_rl and not isinstance(child, RLCreature):
                             # Convert to RL creature
                             child_genome = child.genome
@@ -1308,7 +1351,6 @@ class TopDownScene:
                                 self.space,
                                 (child_body.position.x, child_body.position.y),
                                 genome=child_genome,
-                                global_manager=self.rl_manager,
                                 use_rl=True
                             )
                         
@@ -1373,6 +1415,73 @@ class TopDownScene:
                     self.stats['predations_total'] += 1
                     prey.dead = True
                     predator.devour(prey)
+    
+    def _generate_unique_hue(self, min_distance: float = 30.0) -> float:
+        """Generate a unique hue that doesn't match existing species colors.
+        
+        Args:
+            min_distance: Minimum hue distance from existing colors (degrees, default: 30.0)
+            
+        Returns:
+            Unique hue value (0.0-360.0)
+        """
+        if not self._existing_species:
+            # No existing species, return random hue
+            return random.uniform(0.0, 360.0)
+        
+        existing_hues = list(self._existing_species.values())
+        max_attempts = 100
+        
+        for attempt in range(max_attempts):
+            # Try random hue
+            candidate_hue = random.uniform(0.0, 360.0)
+            
+            # Check distance from all existing hues (circular distance)
+            too_close = False
+            for existing_hue in existing_hues:
+                # Calculate circular distance (handle wrap-around at 360)
+                diff = abs(candidate_hue - existing_hue)
+                circular_diff = min(diff, 360.0 - diff)
+                
+                if circular_diff < min_distance:
+                    too_close = True
+                    break
+            
+            if not too_close:
+                return candidate_hue
+        
+        # If we couldn't find a unique hue, space them evenly
+        # This happens when there are many species
+        gap = 360.0 / (len(existing_hues) + 1)
+        # Place new species at largest gap
+        existing_sorted = sorted(existing_hues)
+        max_gap = 0.0
+        best_position = 0.0
+        
+        for i in range(len(existing_sorted)):
+            next_hue = existing_sorted[(i + 1) % len(existing_sorted)]
+            gap_size = (next_hue - existing_sorted[i]) % 360.0
+            if gap_size > max_gap:
+                max_gap = gap_size
+                best_position = (existing_sorted[i] + gap_size / 2.0) % 360.0
+        
+        return best_position
+
+    def _assign_new_species(self, child_gen: Dict[str, float]) -> Genome:
+        """Assign a new species id and hue to a child genome and return Genome.
+        
+        Args:
+            child_gen: Offspring genome dict to modify
+        Returns:
+            Genome with updated species_id and hue
+        """
+        new_id = self._next_species_id
+        new_hue = self._generate_unique_hue()
+        self._existing_species[new_id] = new_hue
+        child_gen["species_id"] = float(new_id)
+        child_gen["hue"] = new_hue
+        self._next_species_id += 1
+        return Genome(child_gen)
 
     def _spawn_rl_creatures(self, count: int, area: Tuple[int, int, int, int]) -> List[Creature]:
         """Spawn RL-enabled creatures from three distinct species with high speed.
@@ -1457,7 +1566,6 @@ class TopDownScene:
                     self.space,
                     (x, y),
                     genome=Genome(varied_genome),
-                    global_manager=self.rl_manager,
                     use_rl=True
                 )
                 creatures.append(creature)
@@ -1688,44 +1796,73 @@ class TopDownScene:
             self._update_creatures(dt)
             
             # RL training and synchronization
-            if self.use_rl and self.rl_manager:
+            if self.use_rl:
                 self._rl_train_counter += 1
                 
-                # Periodic parameter synchronization
-                if self._rl_train_counter % 100 == 0:
+                # Aggregate statistics from all creatures (for visualization)
+                if self.rl_visualizer and self._rl_train_counter % 500 == 0:
                     rl_creatures = [c for c in self.creatures 
                                   if isinstance(c, RLCreature) and c.use_rl]
                     if rl_creatures:
-                        synced = self.rl_manager.sync_to_agents(rl_creatures)
-                
-                # Record training step if training occurred
-                if self.rl_visualizer and hasattr(self.rl_manager.agent, 'training_stats'):
-                    # Check if training occurred (by checking if stats were updated)
-                    agent_stats = self.rl_manager.agent.training_stats
-                    if agent_stats.get('policy_loss'):
-                        # Get latest training stats
+                        # Aggregate training stats from all creatures
+                        total_trains = sum(c.train_counter for c in rl_creatures)
+                        avg_buffer_size = sum(len(c.experience_buffer) for c in rl_creatures) / len(rl_creatures)
+                        avg_reward = sum(c._total_lifetime_reward / max(1, c.age) for c in rl_creatures) / len(rl_creatures)
+                        # Aggregate PPO metrics if available
+                        recent_stats = [c.get_recent_training_stats() for c in rl_creatures]
+                        # Filter out empties
+                        recent_stats = [s for s in recent_stats if s]
+                        if recent_stats:
+                            mean_policy_loss = sum(s.get('policy_loss', 0.0) for s in recent_stats) / len(recent_stats)
+                            mean_value_loss = sum(s.get('value_loss', 0.0) for s in recent_stats) / len(recent_stats)
+                            mean_entropy = sum(s.get('entropy', 0.0) for s in recent_stats) / len(recent_stats)
+                            mean_clip = sum(s.get('clip_fraction', 0.0) for s in recent_stats) / len(recent_stats)
+                        else:
+                            mean_policy_loss = 0.0
+                            mean_value_loss = 0.0
+                            mean_entropy = 0.0
+                            mean_clip = 0.0
+                        
+                        # Use aggregated stats for visualization
                         latest_stats = {
-                            'average_reward': self.rl_manager.get_statistics().get('recent_avg_reward', 0.0),
-                            'policy_loss': agent_stats['policy_loss'][-1] if agent_stats['policy_loss'] else 0.0,
-                            'value_loss': agent_stats['value_loss'][-1] if agent_stats['value_loss'] else 0.0,
-                            'entropy': agent_stats['entropy'][-1] if agent_stats['entropy'] else 0.0,
-                            'clip_fraction': agent_stats['clip_fraction'][-1] if agent_stats['clip_fraction'] else 0.0,
-                            'buffer_size': self.rl_manager.get_statistics().get('buffer_size', 0),
+                            'average_reward': avg_reward,
+                            'policy_loss': mean_policy_loss,
+                            'value_loss': mean_value_loss,
+                            'entropy': mean_entropy,
+                            'clip_fraction': mean_clip,
+                            'buffer_size': int(avg_buffer_size),
                         }
                         self.rl_visualizer.record_training_step(
                             latest_stats,
-                            self.rl_manager.get_statistics().get('total_updates', 0)
+                            total_trains
                         )
+                        
+                        print(f"[RL] Independent Learning - Creatures: {len(rl_creatures)}, "
+                              f"Avg Buffer: {avg_buffer_size:.0f}, "
+                              f"Avg Reward: {avg_reward:.3f}, "
+                              f"Policy: {mean_policy_loss:.3f}, Value: {mean_value_loss:.3f}, "
+                              f"Entropy: {mean_entropy:.3f}, Clip: {mean_clip:.3f}")
                 
-                # Periodic training statistics
-                if self._rl_train_counter % 500 == 0:
-                    stats = self.rl_manager.get_statistics()
-                    # Can be logged or displayed in HUD
-                    if stats['total_updates'] > 0:
-                        avg_reward = stats.get('recent_avg_reward', 0.0)
-                        print(f"[RL] Updates: {stats['total_updates']}, "
-                              f"Buffer: {stats['buffer_size']}, "
-                              f"AvgReward: {avg_reward:.3f}")
+                # Periodic evolution tracking (every 1000 steps)
+                if self.evolution_supervisor and self._rl_train_counter % 1000 == 0:
+                    # Update fitness tracking for all alive RL creatures
+                    rl_creatures = [c for c in self.creatures 
+                                  if isinstance(c, RLCreature) and c.use_rl]
+                    for creature in rl_creatures:
+                        fitness_metrics = creature.get_fitness_metrics()
+                        self.evolution_supervisor.track_fitness(creature.id, fitness_metrics)
+                    
+                    # Record generation statistics
+                    self.evolution_supervisor.record_generation(rl_creatures)
+                    
+                    # Print evolution stats occasionally
+                    if self._rl_train_counter % 5000 == 0:
+                        evo_stats = self.evolution_supervisor.get_evolution_stats()
+                        health = self.evolution_supervisor.get_population_health(rl_creatures)
+                        print(f"[Evolution] Gen: {evo_stats['generation']}, "
+                              f"Fitness: {health['avg_fitness']:.2f}, "
+                              f"Diversity: {health['diversity']:.3f}, "
+                              f"Lifespan: {health['avg_lifespan']:.1f}s")
                         
                         # Record episode stats from RL creatures
                         if self.rl_visualizer:

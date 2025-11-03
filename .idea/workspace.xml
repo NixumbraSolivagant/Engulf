@@ -4,38 +4,14 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="9daa73d9-3052-4423-8e9b-1002c38eef81" name="更改" comment="add Rl">
-      <change afterPath="$PROJECT_DIR$/=3.5.0" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/ANALYSIS.md" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/RL_INTEGRATION_COMPLETE.md" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/RL_USAGE.md" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/RL_VISUALIZATION.md" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/TEST_RESULTS.md" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/engulf/genetics.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/engulf/rl/README.md" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/engulf/rl/__init__.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/engulf/rl/action_executor.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/engulf/rl/experience_buffer.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/engulf/rl/global_manager.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/engulf/rl/integration_example.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/engulf/rl/network.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/engulf/rl/optimizer.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/engulf/rl/ppo.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/engulf/rl/reward_shaping.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/engulf/rl/rl_creature.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/engulf/rl/state_encoder.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/engulf/rl/utils.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/engulf/rl/visualizer.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/engulf/stats_reporter.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/rl_training_report.png" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/simulation_stats.png" afterDir="false" />
+    <list default="true" id="9daa73d9-3052-4423-8e9b-1002c38eef81" name="更改" comment="change something">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/engulf/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/engulf/config.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/engulf/creatures.py" beforeDir="false" afterPath="$PROJECT_DIR$/engulf/creatures.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/engulf/genetics.py" beforeDir="false" afterPath="$PROJECT_DIR$/engulf/genetics.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/engulf/rl/rl_creature.py" beforeDir="false" afterPath="$PROJECT_DIR$/engulf/rl/rl_creature.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/engulf/scene_topdown.py" beforeDir="false" afterPath="$PROJECT_DIR$/engulf/scene_topdown.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/engulf/terrain.py" beforeDir="false" afterPath="$PROJECT_DIR$/engulf/terrain.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/requirements.txt" beforeDir="false" afterPath="$PROJECT_DIR$/requirements.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/rl_training_report.png" beforeDir="false" afterPath="$PROJECT_DIR$/rl_training_report.png" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/simulation_stats.png" beforeDir="false" afterPath="$PROJECT_DIR$/simulation_stats.png" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -84,7 +60,7 @@
       <option name="presentableId" value="Default" />
       <updated>1761919874180</updated>
       <workItem from="1761919875236" duration="1229000" />
-      <workItem from="1761987766680" duration="1906000" />
+      <workItem from="1761987766680" duration="4388000" />
     </task>
     <task id="LOCAL-00001" summary="First">
       <option name="closed" value="true" />
@@ -102,7 +78,15 @@
       <option name="project" value="LOCAL" />
       <updated>1762076197124</updated>
     </task>
-    <option name="localTasksCounter" value="3" />
+    <task id="LOCAL-00003" summary="change something">
+      <option name="closed" value="true" />
+      <created>1762077307337</created>
+      <option name="number" value="00003" />
+      <option name="presentableId" value="LOCAL-00003" />
+      <option name="project" value="LOCAL" />
+      <updated>1762077307337</updated>
+    </task>
+    <option name="localTasksCounter" value="4" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -111,6 +95,7 @@
   <component name="VcsManagerConfiguration">
     <MESSAGE value="First" />
     <MESSAGE value="add Rl" />
-    <option name="LAST_COMMIT_MESSAGE" value="add Rl" />
+    <MESSAGE value="change something" />
+    <option name="LAST_COMMIT_MESSAGE" value="change something" />
   </component>
 </project>

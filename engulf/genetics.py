@@ -605,6 +605,101 @@ def is_same_species(genome_a: Dict[str, float], genome_b: Dict[str, float]) -> b
     return not are_different_species(genome_a, genome_b, threshold=5)
 
 
+def calculate_genetic_distance(genome_a: Dict[str, float], genome_b: Dict[str, float]) -> float:
+    """Calculate genetic distance between two genomes.
+    
+    Uses weighted Euclidean distance on normalized gene values.
+    Key genes (personality, behavior) are weighted more heavily.
+    
+    Args:
+        genome_a: First genome dictionary
+        genome_b: Second genome dictionary
+        
+    Returns:
+        Genetic distance (0.0 = identical, higher = more different)
+    """
+    # Key distinguishing genes with higher weights
+    key_genes = {
+        # Personality/behavior genes (weight 2.0)
+        'curiosity': 2.0, 'aggression': 2.0, 'caution': 2.0,
+        'sociability': 2.0, 'exploration_drive': 2.0, 'predatory_instinct': 2.0,
+        'risk_tolerance': 2.0, 'competitiveness': 2.0,
+        # Physical genes (weight 1.5)
+        'max_speed': 1.5, 'angular_speed': 1.5, 'body_radius': 1.5,
+        'agility': 1.5, 'stamina': 1.5,
+        # Other genes (weight 1.0)
+    }
+    
+    total_distance = 0.0
+    total_weight = 0.0
+    
+    # Calculate weighted distance for key genes
+    for gene_name, weight in key_genes.items():
+        if gene_name in genome_a and gene_name in genome_b:
+            val_a = genome_a[gene_name]
+            val_b = genome_b[gene_name]
+            # Normalize by gene range
+            gene_def = GENES.get(gene_name)
+            if gene_def:
+                min_val, max_val = gene_def.default_range
+                range_size = max(0.001, max_val - min_val)  # Avoid division by zero
+                normalized_diff = abs(val_a - val_b) / range_size
+                total_distance += normalized_diff * weight
+                total_weight += weight
+    
+    # Calculate distance for remaining genes (weight 1.0)
+    for gene_name, gene_def in GENES.items():
+        if gene_name in ('species_id', 'hue') or gene_name in key_genes:
+            continue
+        if gene_name in genome_a and gene_name in genome_b:
+            val_a = genome_a[gene_name]
+            val_b = genome_b[gene_name]
+            min_val, max_val = gene_def.default_range
+            range_size = max(0.001, max_val - min_val)
+            normalized_diff = abs(val_a - val_b) / range_size
+            total_distance += normalized_diff * 1.0
+            total_weight += 1.0
+    
+    # Average weighted distance
+    if total_weight > 0:
+        avg_distance = total_distance / total_weight
+    else:
+        avg_distance = 0.0
+    
+    return avg_distance
+
+
+def check_species_divergence(offspring: Dict[str, float], parent_a: Dict[str, float],
+                            parent_b: Dict[str, float], divergence_threshold: float = 0.35) -> bool:
+    """Check if offspring is divergent enough to be a new species.
+    
+    Args:
+        offspring: Offspring genome dictionary
+        parent_a: First parent genome dictionary
+        parent_b: Second parent genome dictionary
+        divergence_threshold: Minimum genetic distance to be considered new species (default: 0.35)
+        
+    Returns:
+        True if offspring should be considered a new species
+    """
+    # Calculate distance from both parents
+    dist_from_a = calculate_genetic_distance(offspring, parent_a)
+    dist_from_b = calculate_genetic_distance(offspring, parent_b)
+    
+    # Average distance from parents
+    avg_distance = (dist_from_a + dist_from_b) / 2.0
+    
+    # Also check distance between parents (to ensure mutation, not just different parents)
+    parent_distance = calculate_genetic_distance(parent_a, parent_b)
+    
+    # Offspring is new species if:
+    # 1. Average distance from parents > threshold, AND
+    # 2. Offspring is significantly different from both parents
+    return (avg_distance > divergence_threshold and
+            dist_from_a > divergence_threshold * 0.8 and
+            dist_from_b > divergence_threshold * 0.8)
+
+
 def generate_random_genome(num_species: int = 3) -> Dict[str, float]:
     """Generate a random genome with all genes.
     
@@ -728,12 +823,15 @@ def generate_base_species_genome(species_index: int, high_speed: bool = True) ->
     return genome
 
 
-def breed_genomes(parent_a: Dict[str, float], parent_b: Dict[str, float]) -> Dict[str, float]:
-    """Breed two genomes with mutations.
+def breed_genomes(parent_a: Dict[str, float], parent_b: Dict[str, float],
+                  fitness_a: float = 0.5, fitness_b: float = 0.5) -> Dict[str, float]:
+    """Breed two genomes with mutations and fitness-weighted inheritance.
     
     Args:
         parent_a: First parent genome
         parent_b: Second parent genome (must have same species_id)
+        fitness_a: Fitness score of parent A (0.0-1.0, normalized)
+        fitness_b: Fitness score of parent B (0.0-1.0, normalized)
         
     Returns:
         New genome with mixed traits and mutations
@@ -742,26 +840,47 @@ def breed_genomes(parent_a: Dict[str, float], parent_b: Dict[str, float]) -> Dic
         val_a: float,
         val_b: float,
         gene_def: GeneDef,
-        mutation_boost: float = 1.0
+        mutation_boost: float = 1.0,
+        fitness_weight_a: float = 0.5,
+        fitness_weight_b: float = 0.5
     ) -> float:
-        """Mix two gene values with mutation.
+        """Mix two gene values with mutation and fitness weighting.
         
         Args:
             val_a: Value from parent A
             val_b: Value from parent B
             gene_def: Gene definition
             mutation_boost: Multiplier for mutation (from evolutionary_plasticity)
+            fitness_weight_a: Weight for parent A (based on fitness)
+            fitness_weight_b: Weight for parent B (based on fitness)
             
         Returns:
             Mixed and mutated value
         """
-        # Average with mutation
+        # Fitness-weighted average (higher fitness = more influence)
+        total_fitness = fitness_weight_a + fitness_weight_b
+        if total_fitness > 0:
+            weight_a = fitness_weight_a / total_fitness
+            weight_b = fitness_weight_b / total_fitness
+        else:
+            weight_a = weight_b = 0.5
+        
+        v = weight_a * val_a + weight_b * val_b
+        # Add mutation
         mut_scale = gene_def.mutation_scale * mutation_boost
-        v = 0.5 * (val_a + val_b) + random.uniform(-1.0, 1.0) * mut_scale
+        v += random.uniform(-1.0, 1.0) * mut_scale
         
         # Clamp to range
         min_val, max_val = gene_def.default_range
         return max(min_val, min(max_val, v))
+    
+    # Normalize fitness scores (avoid division by zero)
+    total_fitness = fitness_a + fitness_b
+    if total_fitness > 0:
+        fitness_weight_a = fitness_a / total_fitness
+        fitness_weight_b = fitness_b / total_fitness
+    else:
+        fitness_weight_a = fitness_weight_b = 0.5
     
     # Get mutation boost from parents' evolutionary_plasticity
     mut_boost_a = parent_a.get("evolutionary_plasticity", 1.0)
@@ -773,19 +892,23 @@ def breed_genomes(parent_a: Dict[str, float], parent_b: Dict[str, float]) -> Dic
     # Special handling for species_id (never mutates, inherited from parent)
     offspring["species_id"] = parent_a["species_id"]
     
-    # Special handling for hue (circular)
+    # Special handling for hue (circular, fitness-weighted)
     hue_a = parent_a["hue"]
     hue_b = parent_b["hue"]
-    hue = (0.5 * (hue_a + hue_b) + random.uniform(-8.0, 8.0) * mutation_boost) % 360.0
+    hue_avg = (fitness_weight_a * hue_a + fitness_weight_b * hue_b) % 360.0
+    hue = (hue_avg + random.uniform(-8.0, 8.0) * mutation_boost) % 360.0
     offspring["hue"] = hue
     
-    # Mix all other genes
+    # Mix all other genes with fitness weighting
     for name, gene_def in GENES.items():
         if name in ("species_id", "hue"):
             continue
         val_a = parent_a.get(name, gene_def.default_range[0])
         val_b = parent_b.get(name, gene_def.default_range[0])
-        offspring[name] = mix_value(val_a, val_b, gene_def, mutation_boost)
+        offspring[name] = mix_value(
+            val_a, val_b, gene_def, mutation_boost,
+            fitness_weight_a, fitness_weight_b
+        )
     
     return offspring
 
