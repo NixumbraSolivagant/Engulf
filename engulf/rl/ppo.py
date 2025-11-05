@@ -257,7 +257,9 @@ class PPOAgent:
         # Force entropy decay by gradually reducing max log_std
         # This directly controls exploration: higher log_std = more exploration
         # Start with max_log_std = 0.5 (std ≈ 1.65), decay to -1.0 (std ≈ 0.37)
-        max_log_std = 0.5 - min(1.5, self.update_count * 0.0015)  # Decay over ~1000 updates
+        # More aggressive decay: reduce max_log_std faster (over ~100 updates instead of 1000)
+        decay_factor = min(1.0, self.update_count * 0.01)
+        max_log_std = 0.5 - 1.5 * decay_factor  # Decay from 0.5 to -1.0
         min_log_std = -1.5  # Minimum log_std
         log_std = np.clip(log_std, min_log_std, max_log_std)
         
@@ -292,10 +294,10 @@ class PPOAgent:
         # Add entropy bonus with decay
         entropy = self._compute_entropy(states)
         # Decay entropy coefficient over time (already computed in _compute_entropy)
-        # Further reduce entropy bonus as training progresses
+        # More aggressive decay: reduce entropy bonus faster (cap at 100 updates)
         current_entropy_coef = max(
             self.min_entropy_coef,
-            self.initial_entropy_coef * (self.entropy_decay_rate ** self.update_count)
+            self.initial_entropy_coef * (self.entropy_decay_rate ** min(self.update_count, 100))
         )
         policy_loss -= current_entropy_coef * entropy.mean()
         

@@ -1,0 +1,2 @@
+update_step,average_reward,policy_loss,value_loss,entropy,clip_fraction,buffer_size
+1569,-201.9212934995679,-0.0501103295408614,186.1057215806914,11.027262398456063,0.0,410

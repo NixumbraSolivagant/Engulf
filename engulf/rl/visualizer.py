@@ -147,22 +147,28 @@ class RLTrainingVisualizer:
             
             update_steps = np.array(self.history['update_step'])
             
-            # 1. Average reward over time
+            # 1. Average reward over time（平滑+置信带）
             ax1 = plt.subplot(3, 3, 1)
             if self.history['average_reward']:
                 rewards = np.array(self.history['average_reward'])
-                ax1.plot(update_steps[:len(rewards)], rewards, 'b-', linewidth=1.5, label='Average Reward')
-                # Add moving average
-                if len(rewards) > 20:
-                    window = min(50, len(rewards) // 10)
-                    ma = np.convolve(rewards, np.ones(window)/window, mode='valid')
-                    ma_steps = update_steps[window-1:len(ma)+window-1]
-                    ax1.plot(ma_steps[:len(ma)], ma, 'r--', linewidth=2, label=f'MA({window})')
+                steps_r = update_steps[:len(rewards)]
+                ax1.plot(steps_r, rewards, color='#4C78A8', linewidth=1.2, alpha=0.6, label='Average Reward')
+                # 滑动均值与±1σ置信带
+                if len(rewards) >= 10:
+                    window = max(10, min(100, len(rewards) // 5))
+                    kernel = np.ones(window) / window
+                    ma = np.convolve(rewards, kernel, mode='valid')
+                    # 近似滑动标准差（Welford更精确，但代价高；这里用简化版）
+                    sq = np.convolve(rewards**2, kernel, mode='valid')
+                    std = np.sqrt(np.maximum(sq - ma**2, 1e-8))
+                    s = steps_r[window-1:window-1+len(ma)]
+                    ax1.plot(s, ma, color='#E45756', linewidth=2.0, label=f'MA({window})')
+                    ax1.fill_between(s, ma-std, ma+std, color='#E45756', alpha=0.15, label='±1σ')
                 ax1.set_xlabel('Update Step')
                 ax1.set_ylabel('Average Reward')
-                ax1.set_title('Average Reward Over Time')
+                ax1.set_title('Average Reward (Smoothed with ±1σ)')
                 ax1.grid(True, alpha=0.3)
-                ax1.legend()
+                ax1.legend(loc='upper right', framealpha=0.3)
             
             # 2. Policy loss
             ax2 = plt.subplot(3, 3, 2)
@@ -197,16 +203,27 @@ class RLTrainingVisualizer:
                 ax4.grid(True, alpha=0.3)
                 ax4.legend()
             
-            # 5. Clip fraction
+            # 5. Policy loss & Clip fraction（同图双轴）
             ax5 = plt.subplot(3, 3, 5)
-            if self.history['clip_fraction']:
-                clips = np.array(self.history['clip_fraction'])
-                ax5.plot(update_steps[:len(clips)], clips, 'c-', linewidth=1.5, label='Clip Fraction')
+            has_pol = bool(self.history['policy_loss'])
+            has_clip = bool(self.history['clip_fraction'])
+            if has_pol or has_clip:
+                if has_pol:
+                    losses = np.array(self.history['policy_loss'])
+                    steps_l = update_steps[:len(losses)]
+                    ax5.plot(steps_l, losses, color='#72B7B2', linewidth=1.5, label='Policy Loss')
+                    ax5.set_ylabel('Policy Loss')
                 ax5.set_xlabel('Update Step')
-                ax5.set_ylabel('Fraction')
-                ax5.set_title('PPO Clip Fraction')
+                ax5.set_title('Policy Loss & Clip Fraction')
                 ax5.grid(True, alpha=0.3)
-                ax5.legend()
+                ax5.legend(loc='upper left', framealpha=0.3)
+                if has_clip:
+                    clips = np.array(self.history['clip_fraction'])
+                    steps_c = update_steps[:len(clips)]
+                    ax5b = ax5.twinx()
+                    ax5b.plot(steps_c, clips, color='#54A24B', linewidth=1.2, alpha=0.8, label='Clip Fraction')
+                    ax5b.set_ylabel('Clip Fraction')
+                    ax5b.legend(loc='upper right', framealpha=0.3)
             
             # 6. Buffer size
             ax6 = plt.subplot(3, 3, 6)
@@ -254,6 +271,29 @@ class RLTrainingVisualizer:
             ax9.text(0.1, 0.5, summary_text, fontsize=10, verticalalignment='center',
                     fontfamily='monospace', transform=ax9.transAxes)
             
+            # 导出 CSV（便于对比分析）
+            try:
+                import csv
+                csv_path = output_path.replace('.png', '_metrics.csv')
+                with open(csv_path, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    headers = ['update_step','average_reward','policy_loss','value_loss','entropy','clip_fraction','buffer_size']
+                    writer.writerow(headers)
+                    n = len(self.history['update_step'])
+                    for i in range(n):
+                        row = [
+                            self.history['update_step'][i],
+                            self.history['average_reward'][i] if i < len(self.history['average_reward']) else '',
+                            self.history['policy_loss'][i] if i < len(self.history['policy_loss']) else '',
+                            self.history['value_loss'][i] if i < len(self.history['value_loss']) else '',
+                            self.history['entropy'][i] if i < len(self.history['entropy']) else '',
+                            self.history['clip_fraction'][i] if i < len(self.history['clip_fraction']) else '',
+                            self.history['buffer_size'][i] if i < len(self.history['buffer_size']) else '',
+                        ]
+                        writer.writerow(row)
+            except Exception:
+                pass
+
             plt.tight_layout()
             plt.savefig(output_path, dpi=150, bbox_inches='tight')
             plt.close()

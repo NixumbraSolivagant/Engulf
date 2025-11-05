@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import random
 from typing import Tuple, Set, List, Dict
+import os
 
 import pygame
 import pymunk
@@ -51,10 +52,10 @@ except ImportError:
 
 # Constants for creature behavior
 BREED_WINDOW_SECONDS = 5.0  # Increased from 2.0 to allow more breeding opportunities
-BREED_PROXIMITY_BONUS = 25.0  # Increased from 10.0 to make proximity detection easier
+BREED_PROXIMITY_BONUS = 35.0  # Increased to make proximity detection easier
 MAX_BIRTHS_PER_FRAME = 10  # Increased from 5 to allow more births per frame
-POPULATION_CAP = 128
-INITIAL_CREATURE_COUNT = 80
+POPULATION_CAP = 5102
+INITIAL_CREATURE_COUNT = 120
 
 # Affinity computation constants - Enhanced for stronger tropism and higher activity
 RESOURCE_ATTRACT_BASE = 6.0  # Increased from 4.0 for more active movement
@@ -130,6 +131,7 @@ class TopDownScene:
         self.evolution_timer = 0.0
         self.season_timer = 0.0
         self.current_season = 'normal'  # 'growth', 'danger', 'normal'
+        self._current_diversity = 0.0
         
         self._build_all_terrains()
         
@@ -148,6 +150,10 @@ class TopDownScene:
         self.use_rl = cfg.use_rl and RL_AVAILABLE
         self.rl_visualizer = None
         self.evolution_supervisor = None
+        # RL reporting intervals (named constants instead of magic numbers)
+        self._rl_report_interval = 500
+        self._evolution_record_interval = 1000
+        self._evolution_verbose_interval = 5000
         if self.use_rl:
             # Each creature now learns independently (no global manager)
             if RLTrainingVisualizer:
@@ -169,6 +175,29 @@ class TopDownScene:
                 count=INITIAL_CREATURE_COUNT,
                 area=(120, 120, WINDOW_WIDTH - 120, WINDOW_HEIGHT - 120),
             )
+            # Optionally load initial weights from a directory (round-robin)
+            try:
+                load_dir = getattr(self.cfg, 'rl_load_weights_dir', '')
+                if isinstance(load_dir, str) and load_dir:
+                    abspath = os.path.abspath(load_dir)
+                    if os.path.isdir(abspath):
+                        files = [os.path.join(abspath, f) for f in os.listdir(abspath) if f.endswith('.json')]
+                        files.sort()
+                        if files:
+                            assigned = 0
+                            for idx, c in enumerate(self.creatures):
+                                if hasattr(c, 'use_rl') and c.use_rl and hasattr(c, 'local_agent'):
+                                    fpath = files[idx % len(files)]
+                                    try:
+                                        c.local_agent.load(fpath)
+                                        assigned += 1
+                                    except Exception:
+                                        pass
+                            print(f"[RL] Loaded weights for {assigned} agents from {abspath}")
+                    else:
+                        print(f"[RL] Weight dir not found: {abspath}")
+            except Exception as e:
+                print(f"[RL] Error loading weights: {e}")
         else:
             # Use regular gene-driven creatures (3 species, high speed)
             self.creatures: List[Creature] = spawn_creatures(
@@ -708,7 +737,7 @@ class TopDownScene:
             speed_boost = resource_value * dt * speed_adapt * 0.5  # Increased from 0.3 to 0.5
             
             # Breeding cooldown reduction: more effective (increased multiplier)
-            breed_reduction = resource_value * dt * fertility * 0.8  # Increased from 0.5 to 0.8
+            breed_reduction = resource_value * dt * fertility * 1.2  # Increased for faster cooldown reduction
             
             # Apply growth (increase size and mass)
             if growth_amount > 0:
@@ -749,7 +778,7 @@ class TopDownScene:
                 speed_mult *= (1.0 + speed_boost * 1.2)  # Additional 20% boost multiplier
             
             # Apply breeding cooldown reduction (more effective)
-            cooldown_bonus += breed_reduction * 1.3  # Additional 30% effectiveness
+            cooldown_bonus += breed_reduction * 1.6  # Stronger effectiveness
 
         # Apply hazard effects continuously
         if hazard_level > 0:
@@ -770,6 +799,11 @@ class TopDownScene:
                 # Apply hazard effect (scaled by resilience)
                 # RL creatures track hazards in episode_info
                 c.suffer_hazard(0.5, terrain_type=terrain_type)
+
+            # For RL creatures: mark hazard encounter to strengthen learning signal only (no physics push/damp)
+            if self.use_rl and isinstance(c, RLCreature) and hasattr(c, 'episode_info'):
+                c.episode_info['took_hazard'] = True
+                c.episode_info['hazard_level'] = float(hazard_level)
 
         c.set_env_mods(speed_mult, cooldown_bonus, ambient_hazard)
 
@@ -901,12 +935,13 @@ class TopDownScene:
                 state.setdefault('lava_surge_interval', random.uniform(8.0, 12.0))
                 state.setdefault('accumulated_danger', 0.0)
                 
-                # Accumulate danger when creatures are present
+                # Accumulate danger when creatures are present (slower rate)
                 if state.get('creature_count', 0) > 0:
-                    state['accumulated_danger'] = min(0.2, state['accumulated_danger'] + dt * 0.05)
+                    # Reduced accumulation rate: 0.02 instead of 0.05
+                    state['accumulated_danger'] = min(0.15, state['accumulated_danger'] + dt * 0.02)  # Max cap reduced from 0.2 to 0.15
                 else:
-                    # Decay accumulated danger when no creatures
-                    state['accumulated_danger'] = max(0.0, state['accumulated_danger'] - dt * 0.02)
+                    # Faster decay accumulated danger when no creatures
+                    state['accumulated_danger'] = max(0.0, state['accumulated_danger'] - dt * 0.05)  # Increased decay from 0.02 to 0.05
                 
                 state['lava_surge_timer'] += dt
                 if state['lava_surge_timer'] >= state['lava_surge_interval']:
@@ -1012,9 +1047,14 @@ class TopDownScene:
                 recovery_rate = 0.20 if state['base_resource'] > 0.4 else 0.25  # Faster recovery (increased from 0.10-0.15 to 0.20-0.25)
                 state['current_resource'] = min(state['base_resource'], state['current_resource'] + recovery_rate * dt)
             
-            # Pollution accumulation (for hazard terrains)
+            # Pollution accumulation (for hazard terrains) - reduced rate and capped
             if creature_count >= 10 and state['base_hazard'] > 0:
-                state['current_hazard'] = min(state['base_hazard'] * 1.5, state['current_hazard'] + 0.05 * dt)
+                # Much slower accumulation: 0.02 instead of 0.05, max cap at 1.3x instead of 1.5x
+                state['current_hazard'] = min(state['base_hazard'] * 1.3, state['current_hazard'] + 0.02 * dt)
+            # Decay pollution when fewer creatures (allow recovery)
+            elif creature_count < 5 and state['current_hazard'] > state['base_hazard']:
+                decay_rate = 0.03  # Allow hazard to decay back to base
+                state['current_hazard'] = max(state['base_hazard'], state['current_hazard'] - decay_rate * dt)
             
             # Update shape properties
             shape.resource_value = state['current_resource']
@@ -1305,7 +1345,12 @@ class TopDownScene:
                                  self._gene_effects_cache.get_breeding_success_modifier(genome_b_dict) * 0.5
                     base_p = 0.85 * success_mod  # Increased from 0.70 to 0.85 for higher breeding success
                     bonus = 0.5 * (beauty_avg - 0.5) + 0.2 * (timing_avg - 0.5)  # Range: [-0.35, +0.35]
-                    success_p = max(0.3, min(0.98, base_p + bonus))  # Increased min from 0.2 to 0.3, max from 0.95 to 0.98
+                    success_p = max(0.5, min(0.98, base_p + bonus))  # Raise min to 0.5 to ensure births
+                    # Inform RL: mating proximity reward signal
+                    if isinstance(a, RLCreature) and a.use_rl:
+                        a.episode_info['mating_proximity'] = True
+                    if isinstance(b, RLCreature) and b.use_rl:
+                        b.episode_info['mating_proximity'] = True
                     if random.random() < success_p:
                         # Pre-fetch parent genomes
                         a_gen = a.genome.to_dict()
@@ -1325,8 +1370,10 @@ class TopDownScene:
                         
                         # Divergence check for new species
                         child_gen = child_genome.to_dict()
+                        is_new_species = False
                         if check_species_divergence(child_gen, a_gen, b_gen):
                             child_genome = self._assign_new_species(child_gen)
+                            is_new_species = True
                         
                         # Create child at midpoint between parents
                         mid_x = (pa.x + pb.x) * 0.5
@@ -1357,6 +1404,96 @@ class TopDownScene:
                         self.creatures.append(child)
                         self.body_to_creature[child.body] = child
                         
+                        # Update child's color based on species hue (if new species or existing)
+                        try:
+                            child_sid = child.genome.to_dict().get('species_id')
+                            if child_sid is not None:
+                                hue = self._existing_species.get(int(child_sid), child.genome.hue)
+                                # Update genome hue if needed
+                                if abs(child.genome.hue - hue) > 0.1:
+                                    child.genome.hue = hue
+                                # Update shape color immediately
+                                from .creatures import hue_to_rgb
+                                r, g, blue = hue_to_rgb(hue)
+                                child.shape.color = (r, g, blue, 255)
+                        except Exception:
+                            pass
+                        
+                        # If it is a new species, automatically spawn a nearby clone to seed the population
+                        if is_new_species:
+                            # Prefer spacing by body size，以免重叠不明显
+                            base = max(16.0, child.genome.body_radius * 2.5)
+                            angle = random.uniform(0.0, 2.0 * math.pi)
+                            dist = random.uniform(base, base + 24.0)
+                            nx = mid_x + math.cos(angle) * dist
+                            ny = mid_y + math.sin(angle) * dist
+                            # Clamp to window to避免出界
+                            nx = max(30.0, min(WINDOW_WIDTH - 30.0, nx))
+                            ny = max(30.0, min(WINDOW_HEIGHT - 30.0, ny))
+                            clone = RLCreature(
+                                self.space,
+                                (nx, ny),
+                                genome=child_genome,
+                                use_rl=True
+                            )
+                            # Update clone color to match new species
+                            try:
+                                clone_hue = child_genome.hue
+                                from .creatures import hue_to_rgb
+                                r, g, blue = hue_to_rgb(clone_hue)
+                                clone.shape.color = (r, g, blue, 255)
+                            except Exception:
+                                pass
+                            # 给予轻微初速度，避免与亲代重叠
+                            jx = math.cos(angle) * 50.0
+                            jy = math.sin(angle) * 50.0
+                            clone.body.apply_impulse_at_local_point((jx, jy), (0, 0))
+                            self.creatures.append(clone)
+                            self.body_to_creature[clone.body] = clone
+                            births += 1
+
+                        # Fallback: if species id is new but divergence逻辑未触发，依然进行一次复制
+                        if not is_new_species:
+                            try:
+                                sid = child.genome.to_dict().get('species_id', None)
+                                if sid is not None:
+                                    sid_int = int(sid)
+                                    # Check if this is truly a new species (not in existing mapping)
+                                    if sid_int not in self._existing_species:
+                                        # Register this as new species with unique hue
+                                        hue = child.genome.to_dict().get('hue', None)
+                                        if hue is None or hue < 0.1:
+                                            hue = self._generate_unique_hue()
+                                        # Update child's genome hue
+                                        child.genome.hue = float(hue)
+                                        # Update shape color
+                                        from .creatures import hue_to_rgb
+                                        r, g, blue = hue_to_rgb(hue)
+                                        child.shape.color = (r, g, blue, 255)
+                                        # Register in mapping
+                                        self._existing_species[sid_int] = float(hue)
+                                        # Spawn clone if under population cap
+                                        if len(self.creatures) < self.pop_cap:
+                                            base = max(16.0, child.genome.body_radius * 2.5)
+                                            angle = random.uniform(0.0, 2.0 * math.pi)
+                                            dist = random.uniform(base, base + 24.0)
+                                            nx = mid_x + math.cos(angle) * dist
+                                            ny = mid_y + math.sin(angle) * dist
+                                            nx = max(30.0, min(WINDOW_WIDTH - 30.0, nx))
+                                            ny = max(30.0, min(WINDOW_HEIGHT - 30.0, ny))
+                                            clone2 = RLCreature(self.space, (nx, ny), genome=child.genome, use_rl=True)
+                                            # Update clone color too
+                                            clone2.shape.color = (r, g, blue, 255)
+                                            jx = math.cos(angle) * 50.0
+                                            jy = math.sin(angle) * 50.0
+                                            clone2.body.apply_impulse_at_local_point((jx, jy), (0, 0))
+                                            self.creatures.append(clone2)
+                                            self.body_to_creature[clone2.body] = clone2
+                                            births += 1
+                            except Exception as e:
+                                print(f"[Debug] Fallback species check failed: {e}")
+                                pass
+
                         # Track offspring for RL creatures
                         if isinstance(a, RLCreature) and a.use_rl:
                             a.episode_info['offspring_count'] = a.episode_info.get('offspring_count', 0) + 1
@@ -1366,6 +1503,9 @@ class TopDownScene:
                         a._breed_cd = random.uniform(2.0, 4.0)
                         b._breed_cd = random.uniform(2.0, 4.0)
                         births += 1
+        
+        # Update global births counter
+        self.stats['births_total'] += births
 
     def _predation_encounters(self) -> None:
         """Check for predation opportunities between different species.
@@ -1408,9 +1548,9 @@ class TopDownScene:
                     predator, prey = b, a
                 else:
                     continue
-                # Probability based on aggression vs prey caution (reduced for lower mortality)
-                p = 0.20 + 0.30 * predator.genome.aggression - 0.40 * prey.genome.caution  # Reduced base from 0.35 to 0.20, coefficient from 0.45 to 0.30, caution bonus from 0.30 to 0.40
-                if random.random() < max(0.03, min(0.85, p)):  # Reduced max from 0.95 to 0.85
+                # Probability based on aggression vs prey caution (further reduced)
+                p = 0.12 + 0.25 * predator.genome.aggression - 0.45 * prey.genome.caution
+                if random.random() < max(0.02, min(0.70, p)):
                     # Track predation
                     self.stats['predations_total'] += 1
                     prey.dead = True
@@ -1482,6 +1622,48 @@ class TopDownScene:
         child_gen["hue"] = new_hue
         self._next_species_id += 1
         return Genome(child_gen)
+
+    def _aggregate_and_record_rl_stats(self) -> None:
+        """Aggregate per-creature RL stats and record a visualizer step.
+        
+        Aggregates: average_reward, policy/value loss, entropy, clip_fraction,
+        buffer size; prints a concise status line to console.
+        """
+        rl_creatures = [c for c in self.creatures if isinstance(c, RLCreature) and c.use_rl]
+        if not rl_creatures:
+            return
+        
+        total_trains = sum(c.train_counter for c in rl_creatures)
+        avg_buffer_size = sum(len(c.experience_buffer) for c in rl_creatures) / len(rl_creatures)
+        avg_reward = sum(c._total_lifetime_reward / max(1, c.age) for c in rl_creatures) / len(rl_creatures)
+        recent_stats = [s for s in (c.get_recent_training_stats() for c in rl_creatures) if s]
+        if recent_stats:
+            mean_policy_loss = sum(s.get('policy_loss', 0.0) for s in recent_stats) / len(recent_stats)
+            mean_value_loss = sum(s.get('value_loss', 0.0) for s in recent_stats) / len(recent_stats)
+            mean_entropy = sum(s.get('entropy', 0.0) for s in recent_stats) / len(recent_stats)
+            mean_clip = sum(s.get('clip_fraction', 0.0) for s in recent_stats) / len(recent_stats)
+        else:
+            mean_policy_loss = 0.0
+            mean_value_loss = 0.0
+            mean_entropy = 0.0
+            mean_clip = 0.0
+        
+        latest_stats = {
+            'average_reward': avg_reward,
+            'policy_loss': mean_policy_loss,
+            'value_loss': mean_value_loss,
+            'entropy': mean_entropy,
+            'clip_fraction': mean_clip,
+            'buffer_size': int(avg_buffer_size),
+        }
+        self.rl_visualizer.record_training_step(latest_stats, total_trains)
+        
+        print(
+            f"[RL] Independent Learning - Creatures: {len(rl_creatures)}, "
+            f"Avg Buffer: {avg_buffer_size:.0f}, Avg Reward: {avg_reward:.3f}, "
+            f"Policy: {mean_policy_loss:.3f}, Value: {mean_value_loss:.3f}, "
+            f"Entropy: {mean_entropy:.3f}, Clip: {mean_clip:.3f}"
+        )
 
     def _spawn_rl_creatures(self, count: int, area: Tuple[int, int, int, int]) -> List[Creature]:
         """Spawn RL-enabled creatures from three distinct species with high speed.
@@ -1568,6 +1750,17 @@ class TopDownScene:
                     genome=Genome(varied_genome),
                     use_rl=True
                 )
+                # Ensure color matches species_id (use hue from _existing_species mapping)
+                try:
+                    sid = int(varied_genome.get('species_id', species_idx))
+                    if sid in self._existing_species:
+                        hue = self._existing_species[sid]
+                        creature.genome.hue = hue
+                        from .creatures import hue_to_rgb
+                        r, g, blue = hue_to_rgb(hue)
+                        creature.shape.color = (r, g, blue, 255)
+                except Exception:
+                    pass
                 creatures.append(creature)
                 self.body_to_creature[creature.body] = creature
         
@@ -1707,10 +1900,37 @@ class TopDownScene:
     def _draw_custom(self):
         # Create transparent overlay layer for terrain visualization
         overlay = pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 0))  # ensure fully transparent start
 
         # Draw terrains with transparency
         # Draw all terrain shapes (both sensor and non-sensor), but skip creature shapes
         creature_bodies = {c.body for c in self.creatures}
+        
+        # Compute hazard distribution percentiles (Q10, Q90) for robust normalization
+        hazard_values = []
+        for shape_iter in self.space.shapes:
+            if shape_iter.body in creature_bodies:
+                continue
+            if not hasattr(shape_iter, "color"):
+                continue
+            hv = getattr(shape_iter, 'hazard_level', None)
+            if hv is not None:
+                try:
+                    hazard_values.append(max(0.0, float(hv)))
+                except Exception:
+                    pass
+        q10 = 0.0
+        q90 = 1.0
+        if hazard_values:
+            vals = sorted(hazard_values)
+            n = len(vals)
+            i10 = max(0, min(n - 1, int(0.10 * (n - 1))))
+            i90 = max(0, min(n - 1, int(0.90 * (n - 1))))
+            q10 = vals[i10]
+            q90 = vals[i90]
+            if q90 - q10 < 1e-6:
+                q10, q90 = 0.0, max(1.0, q90)
+
         for shape in self.space.shapes:
             # Skip creature shapes (they are drawn separately)
             if shape.body in creature_bodies:
@@ -1719,10 +1939,34 @@ class TopDownScene:
             # Only draw shapes that have a color attribute (terrain shapes)
             if not hasattr(shape, "color"):
                 continue
+            # Skip walls/segments to avoid artifacts
+            if isinstance(shape, pymunk.Segment):
+                continue
             
             color = shape.color
             if not isinstance(color, (tuple, list)) or len(color) < 4:
                 continue
+            
+            # Visualize dynamic resource/hazard: modulate brightness
+            resource_val = getattr(shape, 'resource_value', 0.0)
+            hazard_val = getattr(shape, 'hazard_level', 0.0)
+            # Normalize values: resource linear; hazard via percentile-based normalization
+            res_n = max(0.0, min(1.0, resource_val * 1.5))
+            if q90 > q10:
+                haz_n = (float(hazard_val) - q10) / (q90 - q10)
+            else:
+                haz_n = float(hazard_val)
+            haz_n = max(0.0, min(1.0, haz_n))
+            # Higher contrast mapping: more resource -> much brighter, hazard -> darker
+            raw = 0.5 + 0.8 * (res_n - 0.6 * haz_n)
+            factor = max(0.2, min(1.25, raw))
+            r, g, b, a = color
+            mod_color = (
+                min(255, int(r * factor)),
+                min(255, int(g * factor)),
+                min(255, int(b * factor)),
+                a,
+            )
             
             if isinstance(shape, pymunk.Poly):
                 verts = shape.get_vertices()
@@ -1734,17 +1978,109 @@ class TopDownScene:
                     x = v.x * cosa - v.y * sina + bx
                     y = v.x * sina + v.y * cosa + by
                     pts.append((x, y))
-                pygame.draw.polygon(overlay, color, pts, 0)
+                pygame.draw.polygon(overlay, mod_color, pts, 0)
                 # Draw outline with higher alpha
-                outline_color = (color[0], color[1], color[2], min(255, color[3] + 40))
+                outline_color = (mod_color[0], mod_color[1], mod_color[2], min(255, mod_color[3] + 40))
                 pygame.draw.polygon(overlay, outline_color, pts, 2)
+
+                # --- Hatch overlays: resource (horizontal), hazard (diagonal) ---
+                # Build local rect
+                min_x = min(p[0] for p in pts)
+                max_x = max(p[0] for p in pts)
+                min_y = min(p[1] for p in pts)
+                max_y = max(p[1] for p in pts)
+                rect_w = max(1, int(max_x - min_x))
+                rect_h = max(1, int(max_y - min_y))
+
+                # Skip off-screen minimal rects
+                if rect_w > 2 and rect_h > 2:
+                    # Create mask surface for polygon
+                    poly_mask_surf = pygame.Surface((rect_w, rect_h), pygame.SRCALPHA)
+                    # Draw polygon in local coords
+                    local_pts = [(int(p[0] - min_x), int(p[1] - min_y)) for p in pts]
+                    pygame.draw.polygon(poly_mask_surf, (255, 255, 255, 255), local_pts, 0)
+                    poly_mask = pygame.mask.from_surface(poly_mask_surf)
+
+                    # Resource hatch: horizontal lines
+                    res_alpha = int(90 + 140 * res_n)  # 90..230
+                    res_spacing = int(18 - 12 * res_n)  # 18..6
+                    if res_n > 0.02 and res_alpha > 0 and res_spacing >= 4:
+                        hatch_res = pygame.Surface((rect_w, rect_h), pygame.SRCALPHA)
+                        y = 0
+                        while y < rect_h:
+                            pygame.draw.line(hatch_res, (255, 255, 255, res_alpha), (0, y), (rect_w, y), 1)
+                            y += res_spacing
+                        # Clip hatch to polygon mask
+                        mask_surface = poly_mask.to_surface(setcolor=(255, 255, 255, 255), unsetcolor=(0, 0, 0, 0))
+                        hatch_res.blit(mask_surface, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+                        overlay.blit(hatch_res, (int(min_x), int(min_y)), special_flags=pygame.BLEND_RGBA_ADD)
+
+                    # Hazard hatch: 45-degree diagonal lines
+                    haz_alpha = int(120 + 135 * haz_n)  # 120..255
+                    haz_spacing = int(20 - 12 * haz_n)  # 20..8
+                    if haz_n > 0.02 and haz_alpha > 0 and haz_spacing >= 4:
+                        hatch_haz = pygame.Surface((rect_w, rect_h), pygame.SRCALPHA)
+                        # Draw diagonals by tiling lines across extended range
+                        # We draw lines with slope +1 across the rect
+                        # Start from negative offset to cover fully
+                        start = -rect_h
+                        end = rect_w
+                        x = start
+                        while x < end + rect_h:
+                            p1 = (x, 0)
+                            p2 = (x + rect_h, rect_h)
+                            pygame.draw.line(hatch_haz, (255, 0, 0, haz_alpha), p1, p2, 1)
+                            x += haz_spacing
+                        # Clip to polygon
+                        mask_surface = poly_mask.to_surface(setcolor=(255, 255, 255, 255), unsetcolor=(0, 0, 0, 0))
+                        hatch_haz.blit(mask_surface, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+                        overlay.blit(hatch_haz, (int(min_x), int(min_y)), special_flags=pygame.BLEND_RGBA_ADD)
             
             elif isinstance(shape, pymunk.Circle):
                 bx, by = shape.body.position.x, shape.body.position.y
-                pygame.draw.circle(overlay, color, (int(bx), int(by)), int(shape.radius))
+                pygame.draw.circle(overlay, mod_color, (int(bx), int(by)), int(shape.radius))
                 # Draw outline with higher alpha
-                outline_color = (color[0], color[1], color[2], min(255, color[3] + 40))
+                outline_color = (mod_color[0], mod_color[1], mod_color[2], min(255, mod_color[3] + 40))
                 pygame.draw.circle(overlay, outline_color, (int(bx), int(by)), int(shape.radius), 2)
+
+                # --- Hatch overlays for circle ---
+                rect_w = rect_h = int(shape.radius * 2)
+                if rect_w > 2 and rect_h > 2:
+                    min_x = int(bx - shape.radius)
+                    min_y = int(by - shape.radius)
+                    circle_mask_surf = pygame.Surface((rect_w, rect_h), pygame.SRCALPHA)
+                    pygame.draw.circle(circle_mask_surf, (255, 255, 255, 255), (int(shape.radius), int(shape.radius)), int(shape.radius))
+                    circle_mask = pygame.mask.from_surface(circle_mask_surf)
+
+                    # Resource horizontal lines
+                    res_alpha = int(90 + 140 * res_n)
+                    res_spacing = int(18 - 12 * res_n)
+                    if res_n > 0.02 and res_alpha > 0 and res_spacing >= 4:
+                        hatch_res = pygame.Surface((rect_w, rect_h), pygame.SRCALPHA)
+                        y = 0
+                        while y < rect_h:
+                            pygame.draw.line(hatch_res, (255, 255, 255, res_alpha), (0, y), (rect_w, y), 1)
+                            y += res_spacing
+                        mask_surface = circle_mask.to_surface(setcolor=(255, 255, 255, 255), unsetcolor=(0, 0, 0, 0))
+                        hatch_res.blit(mask_surface, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+                        overlay.blit(hatch_res, (min_x, min_y), special_flags=pygame.BLEND_RGBA_ADD)
+
+                    # Hazard diagonal lines (45 degrees)
+                    haz_alpha = int(120 + 135 * haz_n)
+                    haz_spacing = int(20 - 12 * haz_n)
+                    if haz_n > 0.02 and haz_alpha > 0 and haz_spacing >= 4:
+                        hatch_haz = pygame.Surface((rect_w, rect_h), pygame.SRCALPHA)
+                        start = -rect_h
+                        end = rect_w
+                        x = start
+                        while x < end + rect_h:
+                            p1 = (x, 0)
+                            p2 = (x + rect_h, rect_h)
+                            pygame.draw.line(hatch_haz, (255, 0, 0, haz_alpha), p1, p2, 1)
+                            x += haz_spacing
+                        mask_surface = circle_mask.to_surface(setcolor=(255, 255, 255, 255), unsetcolor=(0, 0, 0, 0))
+                        hatch_haz.blit(mask_surface, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+                        overlay.blit(hatch_haz, (min_x, min_y), special_flags=pygame.BLEND_RGBA_ADD)
         
         # Apply overlay to screen
         self.screen.blit(overlay, (0, 0))
@@ -1765,6 +2101,28 @@ class TopDownScene:
             f"  {s.hint_quit}",
             f"  G: Toggle debug/custom draw",
         ]
+        
+        # Realtime population/species counters
+        alive_count = sum(1 for c in self.creatures if not c.dead)
+        # Prefer species_id if present; fallback to approximate key
+        species_ids = set()
+        for c in self.creatures:
+            if c.dead:
+                continue
+            g = c.genome.to_dict()
+            sid = g.get('species_id')
+            if sid is None:
+                sid = (
+                    round(g.get('aggression', 0.5), 1),
+                    round(g.get('curiosity', 0.5), 1),
+                    round(g.get('sociability', 0.5), 1),
+                )
+            species_ids.add(sid)
+        lines.append("")
+        lines.append("Population:")
+        lines.append(f"  Current: {alive_count} / Cap {self.pop_cap}")
+        lines.append(f"  Species: {len(species_ids)}")
+        lines.append(f"  Births: {self.stats['births_total']}  Deaths: {self.stats['deaths_total']}  Predations: {self.stats['predations_total']}")
         
         # Add RL statistics if RL mode is enabled
         if self.use_rl and self.rl_visualizer:
@@ -1795,56 +2153,16 @@ class TopDownScene:
             self._update_terrain_dynamics(dt)  # Update dynamic terrain systems
             self._update_creatures(dt)
             
-            # RL training and synchronization
+            # RL training and reporting (independent learning)
             if self.use_rl:
                 self._rl_train_counter += 1
                 
                 # Aggregate statistics from all creatures (for visualization)
-                if self.rl_visualizer and self._rl_train_counter % 500 == 0:
-                    rl_creatures = [c for c in self.creatures 
-                                  if isinstance(c, RLCreature) and c.use_rl]
-                    if rl_creatures:
-                        # Aggregate training stats from all creatures
-                        total_trains = sum(c.train_counter for c in rl_creatures)
-                        avg_buffer_size = sum(len(c.experience_buffer) for c in rl_creatures) / len(rl_creatures)
-                        avg_reward = sum(c._total_lifetime_reward / max(1, c.age) for c in rl_creatures) / len(rl_creatures)
-                        # Aggregate PPO metrics if available
-                        recent_stats = [c.get_recent_training_stats() for c in rl_creatures]
-                        # Filter out empties
-                        recent_stats = [s for s in recent_stats if s]
-                        if recent_stats:
-                            mean_policy_loss = sum(s.get('policy_loss', 0.0) for s in recent_stats) / len(recent_stats)
-                            mean_value_loss = sum(s.get('value_loss', 0.0) for s in recent_stats) / len(recent_stats)
-                            mean_entropy = sum(s.get('entropy', 0.0) for s in recent_stats) / len(recent_stats)
-                            mean_clip = sum(s.get('clip_fraction', 0.0) for s in recent_stats) / len(recent_stats)
-                        else:
-                            mean_policy_loss = 0.0
-                            mean_value_loss = 0.0
-                            mean_entropy = 0.0
-                            mean_clip = 0.0
-                        
-                        # Use aggregated stats for visualization
-                        latest_stats = {
-                            'average_reward': avg_reward,
-                            'policy_loss': mean_policy_loss,
-                            'value_loss': mean_value_loss,
-                            'entropy': mean_entropy,
-                            'clip_fraction': mean_clip,
-                            'buffer_size': int(avg_buffer_size),
-                        }
-                        self.rl_visualizer.record_training_step(
-                            latest_stats,
-                            total_trains
-                        )
-                        
-                        print(f"[RL] Independent Learning - Creatures: {len(rl_creatures)}, "
-                              f"Avg Buffer: {avg_buffer_size:.0f}, "
-                              f"Avg Reward: {avg_reward:.3f}, "
-                              f"Policy: {mean_policy_loss:.3f}, Value: {mean_value_loss:.3f}, "
-                              f"Entropy: {mean_entropy:.3f}, Clip: {mean_clip:.3f}")
+                if self.rl_visualizer and self._rl_train_counter % self._rl_report_interval == 0:
+                    self._aggregate_and_record_rl_stats()
                 
                 # Periodic evolution tracking (every 1000 steps)
-                if self.evolution_supervisor and self._rl_train_counter % 1000 == 0:
+                if self.evolution_supervisor and self._rl_train_counter % self._evolution_record_interval == 0:
                     # Update fitness tracking for all alive RL creatures
                     rl_creatures = [c for c in self.creatures 
                                   if isinstance(c, RLCreature) and c.use_rl]
@@ -1856,9 +2174,11 @@ class TopDownScene:
                     self.evolution_supervisor.record_generation(rl_creatures)
                     
                     # Print evolution stats occasionally
-                    if self._rl_train_counter % 5000 == 0:
+                    if self._rl_train_counter % self._evolution_verbose_interval == 0:
                         evo_stats = self.evolution_supervisor.get_evolution_stats()
                         health = self.evolution_supervisor.get_population_health(rl_creatures)
+                        # Cache current diversity for RL global bonus module
+                        self._current_diversity = float(health.get('diversity', 0.0))
                         print(f"[Evolution] Gen: {evo_stats['generation']}, "
                               f"Fitness: {health['avg_fitness']:.2f}, "
                               f"Diversity: {health['diversity']:.3f}, "

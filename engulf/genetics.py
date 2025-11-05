@@ -59,7 +59,7 @@ GENES: Dict[str, GeneDef] = {
     "body_radius": GeneDef(
         name="body_radius",
         category=CATEGORY_APPEARANCE,
-        default_range=(12.0, 22.0),
+        default_range=(8.0, 14.0),  # Reduced max from 22.0 to 16.0
         mutation_scale=1.0,
         description="Physical body radius"
     ),

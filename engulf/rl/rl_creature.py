@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 from typing import Dict, Optional, Tuple, List
+import math
 import random
 
 from ..creatures import Creature, Genome
@@ -41,6 +42,10 @@ class RLCreature(Creature):
         self.use_rl = use_rl
         
         if use_rl:
+            # Tunables (kept small and localized for clarity)
+            self._MIN_SIGNIFICANT_MOVE = 5.0
+            self._HIGH_SPEED_THRESHOLD = 100.0  # px/s
+            self._MAX_EPISODE_STEPS = 4000  # soft cap to avoid runaway episodes
             # State encoder
             self.state_encoder = StateEncoder()
             
@@ -63,7 +68,8 @@ class RLCreature(Creature):
             self.experience_buffer = ExperienceBuffer(capacity=buffer_capacity)
             self.total_experiences = 0
             self.train_counter = 0
-            self.train_frequency = 50  # Train every 50 experiences
+            self.train_frequency = 50  # default; may override from scene.cfg at runtime
+            self._train_freq_overridden = False
             
             # RL state tracking
             self.last_state = None
@@ -92,6 +98,20 @@ class RLCreature(Creature):
             self._spawn_position = position  # Track spawn position for distance calculation
             self._cumulative_distance = 0.0  # Track total distance traveled
             self._last_distance_reward = 0.0  # Track last distance reward value
+            # Intrinsic exploration (novelty) tracking
+            self._visit_counts: Dict[Tuple[int, int], int] = {}
+            self._visit_last_time: Dict[Tuple[int, int], float] = {}
+            self._cell_size: float = 60.0
+            # Resource accumulation (for diminishing returns)
+            self._resource_total: float = 0.0
+            # Hazard streak tracking
+            self._consecutive_hazard_steps: int = 0
+            # Learning: reward leaving danger after hazard
+            self._took_hazard_last_step: bool = False
+            # Resource diversity tracking
+            self._last_resource_type: Optional[str] = None
+            # Long safe-chain tracking
+            self._safe_steps: int = 0
             
             # Evolution & fitness tracking
             self._fitness_metrics = FitnessMetrics()
@@ -133,6 +153,11 @@ class RLCreature(Creature):
             # Finalize episode (will be called in _cull_dead)
             return
         
+        # Episode step cap (soft): end episode if too long
+        if self.episode_steps >= self._MAX_EPISODE_STEPS:
+            self.dead = True
+            return
+        
         # Encode state
         state = self.state_encoder.encode(self, scene, nearby_creatures or [])
         
@@ -144,34 +169,65 @@ class RLCreature(Creature):
         action_info = self.action_executor.execute(self, action, dt)
         
         # Track movement and speed before computing reward
-        if self.last_position is not None:
-            current_pos = (self.body.position.x, self.body.position.y)
-            movement_dist = ((current_pos[0] - self.last_position[0])**2 + 
-                           (current_pos[1] - self.last_position[1])**2)**0.5
-            
-            if movement_dist > 5.0:  # Moved significantly (> 5 pixels)
-                self.episode_info['moved_significantly'] = True
-                self.episode_info['movement_distance'] = movement_dist
-                
-                # Track cumulative distance traveled
-                self._cumulative_distance += movement_dist
-                
-                # Reward high-speed movement (encourages active exploration)
-                speed = movement_dist / (dt if dt > 0 else 0.016)  # pixels per second
-                if speed > 100.0:  # Fast movement (> 100 px/s)
-                    self.episode_info['high_speed'] = True
-                
-                # Distance from spawn (for distance-based reward)
-                if hasattr(self, '_spawn_position'):
-                    dist_from_spawn = ((current_pos[0] - self._spawn_position[0])**2 +
-                                     (current_pos[1] - self._spawn_position[1])**2)**0.5
-                    self.episode_info['distance_traveled'] = dist_from_spawn
-                else:
-                    self.episode_info['distance_traveled'] = self._cumulative_distance
-            
-            self.last_position = current_pos
-        else:
-            self.last_position = (self.body.position.x, self.body.position.y)
+        # One-time override of train frequency and cell size from config if available
+        if scene is not None and hasattr(scene, 'cfg') and self.use_rl and not self._train_freq_overridden:
+            try:
+                self.train_frequency = int(getattr(scene.cfg, 'rl_train_frequency', self.train_frequency))
+            except Exception:
+                pass
+            try:
+                self._cell_size = float(getattr(scene.cfg, 'rl_cell_size', self._cell_size))
+            except Exception:
+                pass
+            self._train_freq_overridden = True
+
+        self._update_movement_flags(dt)
+        # Update intrinsic novelty signal based on coarse grid visitation with time decay
+        if self.use_rl:
+            cx = int(self.body.position.x // max(1.0, self._cell_size))
+            cy = int(self.body.position.y // max(1.0, self._cell_size))
+            key = (cx, cy)
+            visits = self._visit_counts.get(key, 0)
+            last_t = self._visit_last_time.get(key, None)
+            time_since = (self.age - last_t) if (last_t is not None) else 1e9
+            # novelty in (0,1], higher for first-time cells, recovers over time
+            tau = getattr(scene.cfg, 'rl_novelty_time_const', 500.0) if scene is not None and hasattr(scene, 'cfg') else 500.0
+            novelty = 1.0 / (1.0 + visits * math.exp(-time_since / max(1.0, tau)))
+            coeff = getattr(scene.cfg, 'rl_novelty_coeff', 0.6) if scene is not None and hasattr(scene, 'cfg') else 0.6
+            self.episode_info['novelty'] = float(novelty * coeff)
+            self._visit_counts[key] = visits + 1
+            self._visit_last_time[key] = self.age
+            self.episode_info['visits_in_cell'] = visits + 1
+
+            # Directional value: check forward cell (based on velocity direction)
+            vel = self.body.velocity
+            speed = (vel.x * vel.x + vel.y * vel.y) ** 0.5
+            self.episode_info['forward_unvisited'] = False
+            if speed > 5.0:
+                ux, uy = vel.x / speed, vel.y / speed
+                fx = self.body.position.x + ux * self._cell_size
+                fy = self.body.position.y + uy * self._cell_size
+                fkey = (int(fx // max(1.0, self._cell_size)), int(fy // max(1.0, self._cell_size)))
+                if self._visit_counts.get(fkey, 0) == 0:
+                    self.episode_info['forward_unvisited'] = True
+
+            # Resource diversity: detect resource type switch (if near/gaining resource)
+            try:
+                if scene is not None:
+                    terrain_type = scene._find_terrain_type_at(self.body.position.x, self.body.position.y)
+                    self.episode_info['terrain_type'] = terrain_type
+                    if self.episode_info.get('resource_value', 0.0) > 0.0 and terrain_type:
+                        if self._last_resource_type is None:
+                            self._last_resource_type = terrain_type
+                        elif terrain_type != self._last_resource_type:
+                            self.episode_info['resource_switched'] = True
+                            self._last_resource_type = terrain_type
+                        else:
+                            self.episode_info['resource_switched'] = False
+                    else:
+                        self.episode_info['resource_switched'] = False
+            except Exception:
+                pass
         
         # Store for experience collection
         if self.last_state is not None:
@@ -211,6 +267,36 @@ class RLCreature(Creature):
         
         # Update breeding cooldown
         self._breed_cd -= dt
+
+    def _update_movement_flags(self, dt: float) -> None:
+        """Update per-step movement-related episode flags.
+        
+        This keeps `update()` concise and centralizes thresholds.
+        """
+        current_pos = (self.body.position.x, self.body.position.y)
+        if self.last_position is None:
+            self.last_position = current_pos
+            return
+        
+        dx = current_pos[0] - self.last_position[0]
+        dy = current_pos[1] - self.last_position[1]
+        movement_dist = (dx * dx + dy * dy) ** 0.5
+        
+        if movement_dist > self._MIN_SIGNIFICANT_MOVE:
+            self.episode_info['moved_significantly'] = True
+            self.episode_info['movement_distance'] = movement_dist
+            self._cumulative_distance += movement_dist
+            
+            # Speed in px/s (fallback dt to nominal frame delta)
+            denom_dt = dt if dt and dt > 0 else 0.016
+            speed = movement_dist / denom_dt
+            if speed > self._HIGH_SPEED_THRESHOLD:
+                self.episode_info['high_speed'] = True
+            
+            # Remove distance-from-spawn signal (disabled)
+            self.episode_info['distance_traveled'] = 0.0
+        
+        self.last_position = current_pos
     
     def _compute_reward(self, state: np.ndarray, action: np.ndarray,
                        next_state: np.ndarray, scene) -> float:
@@ -241,13 +327,134 @@ class RLCreature(Creature):
                 self.episode_info['growth_amount'] += base_rewards['growth']
         self._last_body_radius = self.genome.body_radius
         
-        # Add lifespan reward (encourages long-term survival)
-        # Small bonus per step that increases with age
+        # Add lifespan reward with exponential decay (avoid "idle survival")
         lifespan_bonus = 0.01 * (1.0 + self.age / max(1.0, self.genome.lifespan_secs))
-        base_rewards['survival'] += lifespan_bonus
+        survival_with_bonus = base_rewards['survival'] + lifespan_bonus
+        decay_base = getattr(scene.cfg, 'rl_survival_decay_factor', 0.6) if scene is not None and hasattr(scene, 'cfg') else 0.6
+        decay = math.exp(- self.age / (decay_base * max(1.0, self.genome.lifespan_secs)))
+        base_rewards['survival'] = survival_with_bonus * decay
         
         # Apply personalized reward
+        # Update cumulative resource and expose to reward shaping for diminishing returns
+        if self.episode_info.get('gained_resource', False):
+            self._resource_total += float(self.episode_info.get('resource_value', 0.0))
+        self.episode_info['resource_total'] = self._resource_total
+        
         reward = self.reward_shaper.calculate(base_rewards)
+
+        # Immediate hazard avoidance penalty (with nonlinear scaling for high hazards)
+        hazard_level = float(self.episode_info.get('hazard_level', 0.0)) if isinstance(self.episode_info.get('hazard_level', 0.0), (int, float)) else 0.0
+        if hazard_level > 0.0:
+            # Continuous penalty scaled by hazard intensity
+            scale = getattr(scene.cfg, 'rl_hazard_penalty_scale', 0.8) if scene is not None and hasattr(scene, 'cfg') else 0.8
+            cap = getattr(scene.cfg, 'rl_hazard_penalty_cap', 3.0) if scene is not None and hasattr(scene, 'cfg') else 3.0
+            # Nonlinear penalty: hazard^1.5 for stronger aversion to high hazards
+            penalty = scale * min(cap, hazard_level ** 1.5)
+            reward -= penalty
+        if self.episode_info.get('took_hazard', False):
+            # Discrete penalty when hazard event happened this step
+            event_pen = getattr(scene.cfg, 'rl_hazard_event_penalty', 1.0) if scene is not None and hasattr(scene, 'cfg') else 1.0
+            reward -= event_pen
+            self._consecutive_hazard_steps += 1
+            self._took_hazard_last_step = True
+        else:
+            self._consecutive_hazard_steps = 0
+            # Learning bonus: left danger after hazard
+            if self._took_hazard_last_step and hazard_level <= 0.02:
+                leave_bonus = getattr(scene.cfg, 'rl_leave_danger_bonus', 1.0) if scene is not None and hasattr(scene, 'cfg') else 1.0
+                reward += leave_bonus
+                self._took_hazard_last_step = False
+        streak_th = getattr(scene.cfg, 'rl_hazard_streak_threshold', 3) if scene is not None and hasattr(scene, 'cfg') else 3
+        streak_pen = getattr(scene.cfg, 'rl_hazard_streak_penalty', 2.0) if scene is not None and hasattr(scene, 'cfg') else 2.0
+        if self._consecutive_hazard_steps >= streak_th:
+            reward -= streak_pen
+
+        # Intrinsic curiosity bonus (novelty-driven)
+        novelty = float(self.episode_info.get('novelty', 0.0))
+        if novelty > 0.0:
+            # Reward more for first-time cells, decays with visits
+            reward += float(self.episode_info.get('novelty', 0.0))
+
+        # Exploration refinements
+        visits_in_cell = int(self.episode_info.get('visits_in_cell', 1))
+        if visits_in_cell >= 2:
+            rep_pen = getattr(scene.cfg, 'rl_repeat_visit_penalty', 0.2) if scene is not None and hasattr(scene, 'cfg') else 0.2
+            reward -= rep_pen * visits_in_cell
+        if self.episode_info.get('forward_unvisited', False):
+            fwd_bonus = getattr(scene.cfg, 'rl_forward_unvisited_bonus', 1.0) if scene is not None and hasattr(scene, 'cfg') else 1.0
+            reward += fwd_bonus
+        if self.episode_info.get('resource_switched', False):
+            switch_bonus = getattr(scene.cfg, 'rl_resource_switch_bonus', 3.0) if scene is not None and hasattr(scene, 'cfg') else 3.0
+            reward += switch_bonus
+
+        # Long safe-chain bonus
+        if hazard_level <= 0.02:
+            self._safe_steps += 1
+        else:
+            self._safe_steps = 0
+        safe_th = getattr(scene.cfg, 'rl_safe_chain_steps', 200) if scene is not None and hasattr(scene, 'cfg') else 200
+        if self._safe_steps >= safe_th:
+            caution = float(self.genome.to_dict().get('caution', 0.5))
+            safe_scale = getattr(scene.cfg, 'rl_safe_chain_bonus_scale', 3.0) if scene is not None and hasattr(scene, 'cfg') else 3.0
+            reward += safe_scale * caution
+
+        # Optional module: Territoriality (own spawn area bonus, others' spawn area penalty)
+        try:
+            territory_radius = 120.0
+            if scene is not None and hasattr(scene, 'cfg'):
+                territory_radius = float(scene.cfg.rl_territory_radius)
+            sx, sy = self._spawn_position if hasattr(self, '_spawn_position') else (self.body.position.x, self.body.position.y)
+            dx = self.body.position.x - sx
+            dy = self.body.position.y - sy
+            if (dx * dx + dy * dy) <= (territory_radius * territory_radius):
+                bonus = getattr(scene.cfg, 'rl_territory_bonus', 1.5) if scene is not None and hasattr(scene, 'cfg') else 1.5
+                reward += bonus
+            # Penalty if inside another individual's spawn territory
+            # Limit checks for efficiency
+            checks = 0
+            for other in (scene.creatures if scene is not None else []):
+                if checks >= 15:
+                    break
+                if other is self or getattr(other, 'dead', False):
+                    continue
+                if not hasattr(other, '_spawn_position'):
+                    continue
+                osx, osy = other._spawn_position
+                odx = self.body.position.x - osx
+                ody = self.body.position.y - osy
+                if (odx * odx + ody * ody) <= (territory_radius * territory_radius):
+                    pen = getattr(scene.cfg, 'rl_intrude_penalty', 1.0) if scene is not None and hasattr(scene, 'cfg') else 1.0
+                    reward -= pen
+                    checks += 1
+        except Exception:
+            pass
+
+        # Optional module: Energy metabolism (direct addition, not gene-weighted)
+        # energy_cost proportional to movement distance; resource_intake from resource_value
+        movement_dist = float(self.episode_info.get('movement_distance', 0.0))
+        resource_intake = float(self.episode_info.get('resource_value', 0.0))
+        e_cost = getattr(scene.cfg, 'rl_energy_cost_per_px', 0.02) if scene is not None and hasattr(scene, 'cfg') else 0.02
+        e_gain = getattr(scene.cfg, 'rl_energy_intake_coeff', 0.5) if scene is not None and hasattr(scene, 'cfg') else 0.5
+        energy_cost = e_cost * movement_dist
+        reward += (-energy_cost + e_gain * resource_intake)
+
+        # Optional module: Diversity (global, from scene)
+        if scene is not None and hasattr(scene, '_current_diversity'):
+            diversity = float(getattr(scene, '_current_diversity', 0.0))
+            center = getattr(scene.cfg, 'rl_diversity_center', 0.6) if scene is not None and hasattr(scene, 'cfg') else 0.6
+            scale = getattr(scene.cfg, 'rl_diversity_scale', 2.0) if scene is not None and hasattr(scene, 'cfg') else 2.0
+            reward += scale * max(0.0, diversity - center)
+
+        # Global reward scaling and clipping for stability
+        clip_val = 2.0
+        scale_val = 0.1
+        if scene is not None and hasattr(scene, 'cfg'):
+            try:
+                clip_val = float(getattr(scene.cfg, 'rl_reward_clip', clip_val))
+                scale_val = float(getattr(scene.cfg, 'rl_reward_scale', scale_val))
+            except Exception:
+                pass
+        reward = max(-clip_val, min(clip_val, reward * scale_val))
         
         # Update lifetime tracking
         self._total_lifetime_reward += reward

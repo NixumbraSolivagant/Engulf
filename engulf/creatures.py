@@ -229,8 +229,8 @@ class Creature:
         self._last_position = pymunk.Vec2d(position[0], position[1])  # Track movement to detect stagnation
         self._stagnation_timer = 0.0  # Track if creature is stuck in one area
 
-        # Breeding cooldown
-        self._breed_cd = random.uniform(2.0, 5.0)
+        # Breeding cooldown (reduced for faster breeding)
+        self._breed_cd = random.uniform(0.5, 2.0)
 
         # Life
         self.age = 0.0

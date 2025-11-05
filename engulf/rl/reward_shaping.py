@@ -26,7 +26,7 @@ class PersonalizedReward:
             'resource': 0.5 + 0.5 * curiosity,
             'exploration': 0.8 + 1.2 * exploration_drive,  # Increased from 0.3-1.0 to 0.8-2.0 (much stronger!)
             'movement': 1.5,  # Increased from 1.0 to 1.5 (encourage active movement)
-            'distance': 1.2,  # New: reward for traveling distance
+            'distance': 0.0,  # Disabled: no reward for being far from spawn
             'reproduction': 0.5 + 0.5 * genome_dict.get('fertility', 0.5),
             'safety': 0.3 + 0.7 * genome_dict.get('caution', 0.5),
             'growth': 0.4 + 0.6 * genome_dict.get('metabolism', 0.5),
@@ -73,21 +73,16 @@ class RewardShaping:
             'growth': 0.0,
             'social': 0.0,
             'movement': 0.08,  # Increased movement reward (encourage exploration)
-            'distance': 0.0,  # Distance traveled reward (calculated dynamically)
+            'distance': 0.0,  # Disabled
         }
+        # Distance-from-spawn reward removed
         
-        # Add distance-based exploration reward (reward for being far from spawn)
-        # Reward based on current distance from spawn, not cumulative (to prevent explosion)
-        distance = info.get('distance_traveled', 0.0)
-        if distance > 100.0:  # Only reward if traveled significant distance
-            # Scale reward with distance, but with diminishing returns
-            # Uses square root to prevent explosion while still rewarding exploration
-            rewards['distance'] = min(1.0 + (distance - 100.0) * 0.002, 3.0)  # 1.0-3.0 range
-        
-        # Resource reward - increased to make it easier to get positive feedback
+        # Resource reward with diminishing returns (discourage farming one spot)
         if info.get('gained_resource', False):
-            resource_value = info.get('resource_value', 0.0)
-            rewards['resource'] = resource_value * 20.0
+            resource_value = float(info.get('resource_value', 0.0))
+            total_collected = float(info.get('resource_total', 0.0))
+            # 20x immediate value, divided by (1 + total/50) to create marginal decay
+            rewards['resource'] = (resource_value * 20.0) / (1.0 + max(0.0, total_collected) / 50.0)
         # Small bonus for being near resources (encourage resource seeking)
         elif info.get('near_resource', False):
             rewards['resource'] = 0.5  # Small continuous reward for proximity
@@ -115,6 +110,9 @@ class RewardShaping:
         if info.get('bred_successfully', False):
             offspring_quality = info.get('offspring_quality', 0.5)
             rewards['reproduction'] = 100.0 * (1.0 + offspring_quality)
+        # Courtship/proximity encouragement: small per-step bonus when in mating proximity
+        if info.get('mating_proximity', False):
+            rewards['reproduction'] += 1.0
         
         # Safety reward
         if info.get('avoided_hazard', False):

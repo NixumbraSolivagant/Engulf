@@ -5,6 +5,8 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="9daa73d9-3052-4423-8e9b-1002c38eef81" name="更改" comment="change something">
+      <change afterPath="$PROJECT_DIR$/EVOLUTION_ENHANCEMENTS.md" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/engulf/rl/evolution_supervisor.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/engulf/creatures.py" beforeDir="false" afterPath="$PROJECT_DIR$/engulf/creatures.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/engulf/genetics.py" beforeDir="false" afterPath="$PROJECT_DIR$/engulf/genetics.py" afterDir="false" />
@@ -60,7 +62,7 @@
       <option name="presentableId" value="Default" />
       <updated>1761919874180</updated>
       <workItem from="1761919875236" duration="1229000" />
-      <workItem from="1761987766680" duration="4388000" />
+      <workItem from="1761987766680" duration="4996000" />
     </task>
     <task id="LOCAL-00001" summary="First">
       <option name="closed" value="true" />
@@ -86,7 +88,15 @@
       <option name="project" value="LOCAL" />
       <updated>1762077307337</updated>
     </task>
-    <option name="localTasksCounter" value="4" />
+    <task id="LOCAL-00004" summary="change something">
+      <option name="closed" value="true" />
+      <created>1762151113500</created>
+      <option name="number" value="00004" />
+      <option name="presentableId" value="LOCAL-00004" />
+      <option name="project" value="LOCAL" />
+      <updated>1762151113500</updated>
+    </task>
+    <option name="localTasksCounter" value="5" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
