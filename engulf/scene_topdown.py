@@ -55,7 +55,7 @@ BREED_WINDOW_SECONDS = 5.0  # Increased from 2.0 to allow more breeding opportun
 BREED_PROXIMITY_BONUS = 35.0  # Increased to make proximity detection easier
 MAX_BIRTHS_PER_FRAME = 10  # Increased from 5 to allow more births per frame
 POPULATION_CAP = 5102
-INITIAL_CREATURE_COUNT = 120
+INITIAL_CREATURE_COUNT = 80
 
 # Affinity computation constants - Enhanced for stronger tropism and higher activity
 RESOURCE_ATTRACT_BASE = 6.0  # Increased from 4.0 for more active movement
@@ -1374,6 +1374,13 @@ class TopDownScene:
                         if check_species_divergence(child_gen, a_gen, b_gen):
                             child_genome = self._assign_new_species(child_gen)
                             is_new_species = True
+                            # Ensure hue is set correctly for new species
+                            child_sid_after = child_genome.to_dict().get('species_id')
+                            if child_sid_after is not None:
+                                child_sid_int_after = int(child_sid_after)
+                                expected_hue = self._existing_species.get(child_sid_int_after)
+                                if expected_hue is not None:
+                                    child_genome.hue = expected_hue
                         
                         # Create child at midpoint between parents
                         mid_x = (pa.x + pb.x) * 0.5
@@ -1404,19 +1411,21 @@ class TopDownScene:
                         self.creatures.append(child)
                         self.body_to_creature[child.body] = child
                         
-                        # Update child's color based on species hue (if new species or existing)
+                        # Update child's color based on species hue (critical for new species)
                         try:
                             child_sid = child.genome.to_dict().get('species_id')
                             if child_sid is not None:
-                                hue = self._existing_species.get(int(child_sid), child.genome.hue)
-                                # Update genome hue if needed
-                                if abs(child.genome.hue - hue) > 0.1:
-                                    child.genome.hue = hue
+                                child_sid_int = int(child_sid)
+                                # Get hue from existing species mapping (should be set for new species)
+                                hue = self._existing_species.get(child_sid_int, child.genome.hue)
+                                # Ensure genome hue matches
+                                child.genome.hue = hue
                                 # Update shape color immediately
                                 from .creatures import hue_to_rgb
                                 r, g, blue = hue_to_rgb(hue)
                                 child.shape.color = (r, g, blue, 255)
-                        except Exception:
+                        except Exception as e:
+                            print(f"[Debug] Color update failed: {e}")
                             pass
                         
                         # If it is a new species, automatically spawn a nearby clone to seed the population
@@ -1436,13 +1445,19 @@ class TopDownScene:
                                 genome=child_genome,
                                 use_rl=True
                             )
-                            # Update clone color to match new species
+                            # Update clone color to match new species (ensure correct hue)
                             try:
-                                clone_hue = child_genome.hue
-                                from .creatures import hue_to_rgb
-                                r, g, blue = hue_to_rgb(clone_hue)
-                                clone.shape.color = (r, g, blue, 255)
-                            except Exception:
+                                clone_sid = clone.genome.to_dict().get('species_id')
+                                if clone_sid is not None:
+                                    clone_sid_int = int(clone_sid)
+                                    # Get hue from existing species mapping (should be set for new species)
+                                    clone_hue = self._existing_species.get(clone_sid_int, clone.genome.hue)
+                                    clone.genome.hue = clone_hue
+                                    from .creatures import hue_to_rgb
+                                    r, g, blue = hue_to_rgb(clone_hue)
+                                    clone.shape.color = (r, g, blue, 255)
+                            except Exception as e:
+                                print(f"[Debug] Clone color update failed: {e}")
                                 pass
                             # 给予轻微初速度，避免与亲代重叠
                             jx = math.cos(angle) * 50.0
